@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: crop_yield_backend
+    # Explicitly run the pipeline module triggering deployed API
+    command: python main.py --mode deploy
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app
+
+  frontend:
+    build: .
+    container_name: crop_yield_frontend
+    command: streamlit run deployment/frontend/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://backend:8000/predict
+    depends_on:
+      - backend

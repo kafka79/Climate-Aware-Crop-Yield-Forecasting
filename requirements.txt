@@ -1,0 +1,46 @@
+# Core ML
+torch>=2.0.0
+torchvision
+torchaudio
+pytorch-lightning
+onnx
+onnxruntime
+
+# Data Processing
+numpy
+pandas
+geopandas
+xarray
+rioxarray
+rasterio
+shapely
+scipy
+scikit-learn
+
+# Geospatial APIs
+sentinelhub
+earthengine-api
+
+# Explainability & Visualization
+shap
+matplotlib
+seaborn
+tqdm
+
+# API & Deployment
+fastapi
+uvicorn
+python-multipart
+pydantic
+pyyaml
+python-dotenv
+
+# Utils
+rich
+loguru
+
+# UI and XAI Details
+streamlit
+requests
+captum
+plotly

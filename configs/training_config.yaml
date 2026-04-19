@@ -1,0 +1,24 @@
+# Training Configuration for Multi-Modal Crop Yield Prediction
+
+training:
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  val_split: 0.2
+  test_split: 0.1
+  early_stopping_patience: 10
+  device: "cpu" # cuda, mps, cpu
+  mode: "deterministic"
+
+optimizer:
+  type: "Adam"
+  scheduler: "ReduceLROnPlateau"
+  factor: 0.5
+  patience: 5
+
+experiment:
+  save_dir: "experiments"
+  name: "crop_yield_transformer_v1"
+  log_every: 10
+  save_every: 20

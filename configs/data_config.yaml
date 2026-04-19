@@ -1,0 +1,41 @@
+# Data Configuration for Crop Yield Prediction Pipeline
+
+project_name: "Climate-Aware Crop Yield Prediction"
+region: "Eastern India"
+
+# Study Areas for Multi-Source Data Fusion
+study_areas:
+  - name: "Burdwan, West Bengal"
+    lat: 23.2324
+    lon: 87.8615
+    bbox: [87.5, 23.0, 88.2, 23.5] # Approx 50km box
+  - name: "Purnia, Bihar"
+    lat: 25.7771
+    lon: 87.4753
+  - name: "Cuttack, Odisha"
+    lat: 20.4625
+    lon: 85.8830
+
+paths:
+  raw:
+    sentinel1: "data/raw/sentinel1"
+    sentinel2: "data/raw/sentinel2"
+    era5: "data/raw/era5"
+    yield: "data/raw/yield"
+  processed:
+    features: "data/processed/features"
+    tensors: "data/processed/tensors"
+    splits: "data/processed/splits"
+
+sentinel_hub:
+  client_id: "YOUR_CLIENT_ID"
+  client_secret: "YOUR_CLIENT_SECRET"
+  instance_id: "YOUR_INSTANCE_ID"
+
+weather:
+  api_key: "YOUR_CDS_API_KEY"
+  parameters: ["2m_temperature", "total_precipitation", "surface_solar_radiation_downwards"]
+
+yield:
+  historical_years: [2018, 2024]
+  crops: ["Rice", "Wheat"]

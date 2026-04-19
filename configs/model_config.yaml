@@ -1,0 +1,22 @@
+# Model Configuration for Multi-Modal Transformer & MDN
+
+transformer:
+  input_dim: 5  # Matched to sample_satellite.csv (5 columns)
+  temporal_dim: 8  # Matched to sample_weather.csv (8 columns)
+  hidden_dim: 256
+  num_heads: 8
+  num_layers: 4
+  dropout: 0.1
+
+mdn:
+  num_mixtures: 5  # Number of Gaussian components for yield distribution
+  hidden_dim: 128
+  output_dim: 1  # Predicted Crop Yield
+
+fusion:
+  strategy: "concat_attention" # Strategies: "concat", "attention", "gated"
+  attention_heads: 4
+  
+explainability:
+  method: "integrated_gradients"
+  steps: 50
