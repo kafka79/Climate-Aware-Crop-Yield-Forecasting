@@ -15,10 +15,14 @@ class SoilFeatureExtractor:
         Example: (Soil_PH * Mean_Precipitation)
         """
         logger.info("Calculating soil-weather interaction features...")
-        # Soil-PH * Precipitation (Higher PH might buffer sensitive crops from high rains)
-        # soil_df["ph_precip_interaction"] = soil_df["ph"] * weather_df["precip"].mean()
-        # return soil_df
-        pass
+        
+        # Calculate mean precip from weather if it has multiple days
+        mean_precip = weather_df['precip'].mean() if 'precip' in weather_df.columns else 0.0
+        
+        interaction_df = soil_df.copy()
+        if 'soil_pH' in interaction_df.columns:
+            interaction_df["ph_precip_interaction"] = interaction_df["soil_pH"] * mean_precip
+        return interaction_df
 
     def categorize_soil_texture(self, clay: float, silt: float, sand: float):
         """
@@ -38,6 +42,18 @@ def process_soil_metrics(soil_df: pd.DataFrame):
     Normalize and scale soil metrics (pH, SOC, N, P, K).
     """
     logger.info("Normalizing soil metrics...")
-    # metrics = ["ph", "soc", "n", "p", "k"]
-    # return (soil_df[metrics] - soil_df[metrics].mean()) / soil_df[metrics].std()
-    pass
+    # Get numeric columns only
+    metrics = soil_df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    if len(metrics) == 0:
+        return soil_df
+
+    # Avoid div by zero
+    std_devs = soil_df[metrics].std()
+    std_devs[std_devs == 0] = 1e-10
+
+    normalized = (soil_df[metrics] - soil_df[metrics].mean()) / std_devs
+    
+    # Merge normalized with non-numeric
+    non_numeric = soil_df.select_dtypes(exclude=[np.number])
+    return pd.concat([normalized, non_numeric], axis=1)

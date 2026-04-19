@@ -2,6 +2,8 @@
 
 project_name: "Climate-Aware Crop Yield Prediction"
 region: "Eastern India"
+use_mock_data: true
+
 
 # Study Areas for Multi-Source Data Fusion
 study_areas:

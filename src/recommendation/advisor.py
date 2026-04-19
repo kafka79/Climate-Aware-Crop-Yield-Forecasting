@@ -41,10 +41,15 @@ class AgronomyAdvisor:
             
         return advice
 
-def get_recommendation_from_xai(xai_explanation: dict):
+def get_recommendation_from_xai(xai_explanation: dict, predicted_risk: str = "High Risk"):
     """
     Integrates results from Integrated Gradients / SHAP to generate advice.
     """
     advisor = AgronomyAdvisor({})
-    # recommendations = advisor.generate_advice("High Risk", xai_explanation)
-    logger.success("Agronomy recommendations generated from XAI data (Skeletal).")
+    
+    if not xai_explanation:
+        return ["No explanation data available to generate recommendations."]
+        
+    recommendations = advisor.generate_advice(predicted_risk, xai_explanation)
+    logger.success("Agronomy recommendations generated from XAI data.")
+    return recommendations

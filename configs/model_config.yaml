@@ -3,6 +3,7 @@
 transformer:
   input_dim: 5  # Matched to sample_satellite.csv (5 columns)
   temporal_dim: 8  # Matched to sample_weather.csv (8 columns)
+  soil_dim: 4
   hidden_dim: 256
   num_heads: 8
   num_layers: 4

@@ -27,20 +27,39 @@ class YieldRiskClassifier:
         else:
             return "Low Risk"
 
-    def calibrate_with_uncertainty(self, mean: float, std: float):
+    def calibrate_with_uncertainty(self, mean: float, std: float, average_yield: float):
         """
         Adjusts risk tier based on prediction confidence (std).
         If uncertainty is high, promote to a higher risk class for safety.
         """
         logger.info(f"Calibrating risk with uncertainty (Mean={mean}, Std={std})...")
-        # risk_score = (1 / mean) * (1 + std)
-        # return "High Risk" if risk_score > threshold else ...
-        pass
+        
+        # Base classification on mean
+        base_risk = self.classify_risk(mean, average_yield)
+        
+        # If the standard deviation is larger than 15% of the mean, elevate risk
+        if std / (mean + 1e-10) > 0.15:
+            if base_risk == "Low Risk":
+                return "Medium Risk (Elevated due to uncertainty)"
+            elif base_risk == "Medium Risk":
+                return "High Risk (Elevated due to uncertainty)"
+            
+        return base_risk
 
-def generate_risk_report(predictions: np.ndarray, uncertainties: np.ndarray, configs: dict):
+def generate_risk_report(predictions: np.ndarray, uncertainties: np.ndarray, historical_avg: float, configs: dict):
     """
     Generate a full risk stratification report for a given region.
     """
     classifier = YieldRiskClassifier(configs.get("thresholds"))
-    # results = [classifier.classify_risk(p, ...) for p in predictions]
-    logger.success("Risk stratification report generated (Skeletal).")
+    results = []
+    
+    for mean, std in zip(predictions, uncertainties):
+        risk = classifier.calibrate_with_uncertainty(mean, std, historical_avg)
+        results.append({
+            "predicted_mean": float(mean),
+            "uncertainty_std": float(std),
+            "calibrated_risk": risk
+        })
+        
+    logger.success("Risk stratification report generated.")
+    return pd.DataFrame(results)

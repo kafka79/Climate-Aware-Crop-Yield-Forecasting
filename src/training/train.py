@@ -58,24 +58,17 @@ def run_training_pipeline(config_path: str):
                 all_y.append(y_area)
     
     if not all_X:
-        logger.error("No processed data found for training. Using mock data for safety.")
-        # Fallback to mock data for testing purposes if no files exist
-        N = 100
-        T = 12
-        C = config["transformer"]["input_dim"]
-        Fw = config["transformer"]["temporal_dim"]
-        Fs = 4 # Matched to soil_encoder hardcode 4
-        sat_final = torch.randn(N, T, C).numpy()
-        weather_final = torch.randn(N, T, Fw).numpy()
-        y_final = torch.randn(N, 1).numpy()
-        soil_final = torch.randn(N, Fs).numpy()
+        logger.error("No processed data found for training. Please run download and preprocess phases first.")
+        return
     else:
         # Assuming all_X contains combined sat and weather for now, splitting them
         X_combined = np.concatenate(all_X, axis=0)
         y_final = np.concatenate(all_y, axis=0)
-        soil_final = np.zeros((len(X_combined), 4))
+        
+        Fs = config["transformer"].get("soil_dim", 4)
+        soil_final = np.zeros((len(X_combined), Fs))
+        
         # Split X_combined into sat and weather based on config dims
-        # Dummy split for now to make it run if actual data is present
         C = config["transformer"]["input_dim"]
         sat_final = X_combined[:, :, :C]
         weather_final = X_combined[:, :, C:]

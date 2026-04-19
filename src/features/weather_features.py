@@ -1,6 +1,7 @@
+import numpy as np
+import pandas as pd
 from scipy import stats
 from loguru import logger
-
 def calculate_gdd(t_max: np.ndarray, t_min: np.ndarray, base_temp: float = 10.0, cap_temp: float = 35.0):
     """
     Calculate Growing Degree Days (GDD).

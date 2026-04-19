@@ -22,7 +22,7 @@ class MixtureDensityNetwork(nn.Module):
         )
         self.sigma = nn.Sequential(
             nn.Linear(input_dim, num_mixtures * output_dim),
-            nn.Exponential() # Variance must be positive
+            nn.Softplus() # Softplus guarantees sigma > 0 (more stable than Exponential)
         )
         self.mu = nn.Linear(input_dim, num_mixtures * output_dim)
 

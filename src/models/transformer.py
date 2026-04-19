@@ -17,7 +17,7 @@ class MultiModalTransformer(nn.Module):
         self.weather_encoder = nn.LSTM(self.config["temporal_dim"], 
                                       self.config["hidden_dim"], 
                                       batch_first=True)
-        self.soil_encoder = nn.Linear(4, self.config["hidden_dim"]) # Static 4 features
+        self.soil_encoder = nn.Linear(self.config.get("soil_dim", 4), self.config["hidden_dim"]) # Static features
         
         # Transformer Layers
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.config["hidden_dim"], 

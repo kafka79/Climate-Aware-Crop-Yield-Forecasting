@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from sentinelhub import (
     SHConfig, 
     SentinelHubRequest, 
@@ -8,6 +9,9 @@ from sentinelhub import (
     SentinelHubDownloadClient
 )
 from typing import Dict, Any, List, Tuple
+import os
+import pandas as pd
+from loguru import logger
 try:
     import cdsapi
 except ImportError:
@@ -116,6 +120,19 @@ def download_multi_modal_batch(config: Dict[str, Any], region: str, crop: str):
     """
     Orchestrate a coordinated download of Yield, Weather, and Satellite data.
     """
+    if config.get("use_mock_data", False):
+        logger.info("Mock data mode enabled. Generating synthetic datasets locally...")
+        from src.data.mock_generator import MockDataGenerator
+        generator = MockDataGenerator(config)
+        generator.generate_yield_dataset()
+        for area in config.get("study_areas", []):
+            bbox = area.get("bbox")
+            if bbox:
+                generator.generate_sentinel_netcdf(area["name"], bbox, ("2023-01-01", "2023-12-31"))
+                generator.generate_era5_netcdf(area["name"], bbox, 2023)
+        logger.success("Synthetic data generation complete.")
+        return
+
     upag_dl = UPAgDownloader(config)
     sat_dl = SentinelHubDownloader(config)
     era5_dl = ERA5Downloader(config)
