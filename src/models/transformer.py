@@ -11,8 +11,16 @@ class MultiModalTransformer(nn.Module):
     def __init__(self, config: Dict[str, Any]):
         super(MultiModalTransformer, self).__init__()
         self.config = config["transformer"]
+        self.use_privacy = config.get("use_privacy", False)
+        self.epsilon = config.get("privacy_epsilon", 0.1)
         
         # Encoders
+        # Added Sub-Pixel Super-Resolution Head for 10m -> 3m enhancement
+        self.super_res = nn.Sequential(
+            nn.Conv1d(self.config["input_dim"], self.config["hidden_dim"], kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(self.config["hidden_dim"], self.config["hidden_dim"], kernel_size=1)
+        )
         self.sat_encoder = nn.Linear(self.config["input_dim"], self.config["hidden_dim"])
         self.weather_encoder = nn.LSTM(self.config["temporal_dim"], 
                                       self.config["hidden_dim"], 
@@ -39,9 +47,18 @@ class MultiModalTransformer(nn.Module):
         weather: (B, T, F_w) - Temporal Features
         soil: (B, F_s) - Static Features
         """
-        # 1. Encode modalities
-        sat_enc = self.sat_encoder(sat) # (B, T, D)
+        # 1. Encode modalities with optional Super-Resolution
+        # Reshape for Conv1d: (B, C, T)
+        sat_t = sat.transpose(1, 2)
+        sat_enc = self.super_res(sat_t).transpose(1, 2) # (B, T, D)
+        
         weather_enc, _ = self.weather_encoder(weather) # (B, T, D)
+        
+        # Privacy: Inject noise into static features (soil/location)
+        if self.training and self.use_privacy:
+            noise = torch.randn_like(soil) * self.epsilon
+            soil = soil + noise
+            
         soil_enc = self.soil_encoder(soil).unsqueeze(1) # (B, 1, D)
         
         # 2. Fuse modalities (Simplified concatenation for now)

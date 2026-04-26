@@ -18,11 +18,17 @@ def main(args):
         logger.warning("No configuration file provided. Using defaults.")
         config = {}
 
+    # Inject CLI overrides into config
+    if args.region:
+        config["region"] = args.region
+    if args.year:
+        config["year"] = args.year
+        config["time_range"] = (f"{args.year}-01-01", f"{args.year}-12-31")
+
     if args.mode == "download":
-        logger.info("Starting Data Download Phase...")
+        logger.info(f"Starting Data Download Phase for {config.get('region')} in {config.get('year')}...")
         from src.data.downloader import download_multi_modal_batch
-        # Note: In a real scenario, region/crop would come from config or args
-        download_multi_modal_batch(config, config.get("region", "Eastern India"), "Rice")
+        download_multi_modal_batch(config, config.get("region"), config.get("crop", "Rice"))
     
     elif args.mode == "preprocess":
         logger.info("Starting Preprocessing Phase...")
@@ -56,6 +62,10 @@ if __name__ == "__main__":
                         help="Pipeline phase to execute.")
     parser.add_argument("--config", type=str, default="configs/data_config.yaml",
                         help="Path to YAML configuration file.")
+    parser.add_argument("--year", type=int, default=2023,
+                        help="Target year for analysis.")
+    parser.add_argument("--region", type=str,
+                        help="Target region (e.g., 'Punjab', 'Iowa').")
     
     args = parser.parse_args()
     main(args)

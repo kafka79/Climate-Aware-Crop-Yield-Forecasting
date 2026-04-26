@@ -14,6 +14,31 @@ class AgronomyAdvisor:
             "ph": "Soil acidity (pH)",
             "soc": "Soil Organic Carbon (Fertility)"
         }
+        self.use_llm = crop_config.get("use_llm", False)
+        self.llm_provider = crop_config.get("llm_provider", "mock")
+
+    def _generate_llm_prompt(self, risk: str, features: Dict[str, float]):
+        """
+        Creates a structured prompt for an LLM to synthesize XAI data into agronomic advice.
+        """
+        prompt = f"System: You are an expert Agronomist.\n"
+        prompt += f"Context: A crop yield model predicts a '{risk}' level for the upcoming harvest.\n"
+        prompt += f"Feature Attributions (Integrated Gradients):\n"
+        for k, v in features.items():
+            prompt += f"- {self.feature_mappings.get(k, k)}: {v:.4f}\n"
+        prompt += f"Task: Synthesize this data into 2-3 specific, actionable recommendations for the farmer. "
+        prompt += "Focus on the features with positive attributions as they drove the risk."
+        return prompt
+
+    def _call_mock_llm(self, prompt: str):
+        """
+        Simulates an LLM call for environments without API keys.
+        """
+        logger.debug(f"Simulating LLM call with prompt: {prompt[:50]}...")
+        # Simple simulated synthesis
+        if "Rainfall" in prompt:
+            return ["Irrigation scheduling should be prioritized given the negative water balance detected in the satellite indices."]
+        return ["Monitor soil nutrients closely during the heading stage to offset atmospheric stress."]
         
     def generate_advice(self, low_yield_risk: str, feature_importance: Dict[str, float]):
         """
@@ -26,6 +51,11 @@ class AgronomyAdvisor:
         sorted_feats = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
         top_feature = sorted_feats[0][0]
         
+        if self.use_llm:
+            prompt = self._generate_llm_prompt(low_yield_risk, feature_importance)
+            return self._call_mock_llm(prompt)
+            
+        # Fallback to Rule-based heuristics if no LLM
         human_feat = self.feature_mappings.get(top_feature, top_feature)
         
         advice = []

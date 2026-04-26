@@ -19,8 +19,20 @@ class SequenceBuilder:
         sequences = []
         labels = []
         for i in range(0, len(data) - self.window_size, self.step_size):
-            window = data.iloc[i : i + self.window_size].drop(columns=[target]).values
+            # Causal Windowing Check
+            window_df = data.iloc[i : i + self.window_size]
+            
+            # Ensure target is NOT in features
+            if target in window_df.columns:
+                window_df = window_df.drop(columns=[target])
+            
+            window = window_df.values
             label = data.iloc[i + self.window_size][target]
+            
+            # Final integrity check (no NaN in labels, labels are strictly in the future of the window)
+            if pd.isna(label):
+                continue
+                
             sequences.append(window)
             labels.append(label)
         
@@ -43,3 +55,16 @@ def build_lag_features(df: pd.DataFrame, lags: List[int], column: str):
     for lag in lags:
         df[f"{column}_lag_{lag}"] = df[column].shift(lag)
     return df
+def validate_temporal_integrity(df: pd.DataFrame, time_col: str = "time"):
+    """
+    Validates that the dataframe is sorted by time and contains no duplicate timestamps
+    per region—preventing non-causal data shuffling.
+    """
+    logger.info("Validating temporal integrity (Causality check)...")
+    if not df[time_col].is_monotonic_increasing:
+        raise ValueError("Data is not temporally sorted. Sequence building will lead to data leakage.")
+    
+    if df.duplicated(subset=[time_col]).any():
+        logger.warning("Duplicate timestamps detected. Ensure data is grouped by location first.")
+    
+    return True

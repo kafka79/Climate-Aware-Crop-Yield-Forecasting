@@ -22,9 +22,10 @@ class MixtureDensityNetwork(nn.Module):
         )
         self.sigma = nn.Sequential(
             nn.Linear(input_dim, num_mixtures * output_dim),
-            nn.Softplus() # Softplus guarantees sigma > 0 (more stable than Exponential)
+            nn.Softplus() # Softplus guarantees sigma > 0
         )
         self.mu = nn.Linear(input_dim, num_mixtures * output_dim)
+        self.epsilon = 1e-6 # Minimum variance for stability
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -39,31 +40,37 @@ class MixtureDensityNetwork(nn.Module):
         sigma = sigma.view(-1, self.num_mixtures, self.output_dim)
         mu = mu.view(-1, self.num_mixtures, self.output_dim)
         
+        # Add epsilon for numerical stability
+        sigma = sigma + self.epsilon
+        
         return pi, sigma, mu
 
-def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: torch.Tensor):
+def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: torch.Tensor, entropy_weight: float = 0.01):
     """
-    Negative Log Likelihood (NLL) Loss for MDN.
+    Negative Log Likelihood (NLL) Loss for MDN with Entropy Regularization.
     target: (B, O)
     """
     # target reshaped to (B, 1, O) to broadcast with (B, K, O)
     target = target.unsqueeze(1).expand_as(mu)
     
     # Calculate GMM probability
-    # m = (1 / sqrt(2*pi*sigma^2)) * exp(-(target-mu)^2 / (2*sigma^2))
-    # We use Log Probability for numerical stability
     m = torch.distributions.Normal(loc=mu, scale=sigma)
     log_prob = m.log_prob(target) # (B, K, O)
     
-    # Sum over output dimension (usually 1 for crop yield)
+    # Sum over output dimension
     log_prob = torch.sum(log_prob, dim=2) # (B, K)
     
     # Weight by mixing coefficients (pi)
-    # loss = -log(sum(pi * exp(log_prob)))
     # Use LogSumExp for stability
-    loss = torch.logsumexp(torch.log(pi + 1e-10) + log_prob, dim=1) # (B,)
+    nll = -torch.logsumexp(torch.log(pi + 1e-10) + log_prob, dim=1) # (B,)
     
-    return -torch.mean(loss)
+    # Entropy Regularization to prevent mode collapse
+    # entropy = -sum(pi * log(pi))
+    entropy_penalty = torch.sum(pi * torch.log(pi + 1e-10), dim=1) 
+    
+    loss = nll + entropy_weight * entropy_penalty
+    
+    return torch.mean(loss)
 
 def initialize_mdn_head(input_dim: int, num_mixtures: int = 5):
     """

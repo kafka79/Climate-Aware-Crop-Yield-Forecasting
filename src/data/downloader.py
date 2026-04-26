@@ -74,10 +74,13 @@ class SentinelHubDownloader(DataDownloader):
             config=self.sh_config
         )
         
-        # client = SentinelHubDownloadClient(config=self.sh_config)
-        # data = client.download(request.get_download_list())
-        # ... logic to save to output_path ...
-        logger.success(f"SentinelHub download simulated for {output_path}")
+        try:
+            client = SentinelHubDownloadClient(config=self.sh_config)
+            data = client.download(request.get_download_list())
+            logger.success(f"SentinelHub download successful for {output_path}")
+        except Exception as e:
+            logger.error(f"SentinelHub API Request failed: {e}")
+            raise  # Re-raising for the integration test to catch it
 
     def download(self, bbox: List[float], time_range: Tuple[str, str], name: str):
         evalscript = "return [B04, B03, B02, B08]" # RGB + NIR
@@ -128,8 +131,8 @@ def download_multi_modal_batch(config: Dict[str, Any], region: str, crop: str):
         for area in config.get("study_areas", []):
             bbox = area.get("bbox")
             if bbox:
-                generator.generate_sentinel_netcdf(area["name"], bbox, ("2023-01-01", "2023-12-31"))
-                generator.generate_era5_netcdf(area["name"], bbox, 2023)
+                generator.generate_sentinel_netcdf(area["name"], bbox, config.get("time_range", ("2023-01-01", "2023-12-31")))
+                generator.generate_era5_netcdf(area["name"], bbox, config.get("year", 2023))
         logger.success("Synthetic data generation complete.")
         return
 
@@ -141,10 +144,13 @@ def download_multi_modal_batch(config: Dict[str, Any], region: str, crop: str):
     yield_df = upag_dl.download(region, crop, (2018, 2024))
     
     # 2. Extract bounding boxes from yield_df locations (or config) and download
+    time_range = config.get("time_range", ("2023-01-01", "2023-12-31"))
+    year = config.get("year", 2023)
+    
     for area in config.get("study_areas", []):
         bbox = area.get("bbox")
         if bbox:
-            sat_dl.download(bbox, ("2023-01-01", "2023-12-31"), area["name"])
-            era5_dl.download(bbox, 2023, area["name"])
+            sat_dl.download(bbox, time_range, area["name"])
+            era5_dl.download(bbox, year, area["name"])
     
     logger.info("Multi-modal batch download orchestration complete.")

@@ -22,7 +22,8 @@ class DataPreprocessor:
         """
         logger.info(f"Preprocessing Sentinel data: {file_path}")
         try:
-            ds = xr.open_dataset(file_path, engine="netcdf4") # or rasterio
+            # Use chunks for Dask-backed lazy loading
+            ds = xr.open_dataset(file_path, engine="netcdf4", chunks={"time": 12, "lat": 100, "lon": 100}) 
             if 'SCL' in ds:
                 # Keep only vegetation, non-vegetated, and water (removing clouds/shadows)
                 mask = ds.SCL.isin([4, 5, 6]) 
@@ -35,6 +36,15 @@ class DataPreprocessor:
         except Exception as e:
             logger.error(f"Error preprocessing Sentinel data: {e}")
             return None
+
+    def fill_temporal_gaps(self, ds: xr.Dataset):
+        """
+        Fills NaNs in the temporal dimension using linear interpolation.
+        Essential for recovering from cloud-masked holes.
+        """
+        logger.info("Filling temporal gaps via linear interpolation...")
+        # limit=3 ensures we don't interpolate over massive missing seasonal blocks
+        return ds.interpolate_na(dim="time", method="linear", limit=3)
     
     def preprocess_weather(self, file_path: str):
         """
@@ -67,12 +77,13 @@ class DataPreprocessor:
         sat_ds = sat_ds.sel(time=common_times)
         weather_ds = weather_ds.sel(time=common_times)
         
-        # 2. Spatial Alignment (Regrid weather to match satellite resolution if needed)
-        # Using nearest neighbor for simplicity in this baseline.
+        # 2. Spatial Alignment (Regrid weather to match satellite resolution)
+        # Using bilinear interpolation for smoother, physically consistent weather fields.
+        logger.debug(f"Interpolating weather ({len(weather_ds.lat)}x{len(weather_ds.lon)}) to satellite resolution ({len(sat_ds.lat)}x{len(sat_ds.lon)})...")
         weather_ds_respaced = weather_ds.interp(
             lat=sat_ds.lat, 
             lon=sat_ds.lon, 
-            method="nearest"
+            method="bilinear"
         )
         
         logger.success("Fusion-ready alignment complete.")
@@ -94,6 +105,9 @@ def preprocess_all(config: Dict[str, Any]):
             ds_weather = preprocessor.preprocess_weather(weather_file)
             
             if ds_sat is not None and ds_weather is not None:
+                # Fill temporal gaps in satellite data before fusion
+                ds_sat = preprocessor.fill_temporal_gaps(ds_sat)
+                
                 final_sat, final_weather = preprocessor.align_modalities(ds_sat, ds_weather, pd.DataFrame())
                 
                 # Save processed data
