@@ -29,3 +29,6 @@ data/processed/*
 
 # Other
 .DS_Store
+
+# Secrets - NEVER commit these
+configs/secrets.yaml

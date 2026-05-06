@@ -1,15 +1,17 @@
 # Training Configuration for Multi-Modal Crop Yield Prediction
 
 training:
-  batch_size: 32
-  num_epochs: 100
+  batch_size: 8
+  num_epochs: 25
   learning_rate: 0.0001
   weight_decay: 0.00001
   val_split: 0.2
   test_split: 0.1
   early_stopping_patience: 10
   device: "cpu" # cuda, mps, cpu
-  mode: "deterministic"
+  mode: "probabilistic"
+  window_size: 12
+  save_path: "models/checkpoints"
 
 optimizer:
   type: "Adam"

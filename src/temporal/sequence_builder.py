@@ -22,9 +22,12 @@ class SequenceBuilder:
             # Causal Windowing Check
             window_df = data.iloc[i : i + self.window_size]
             
-            # Ensure target is NOT in features
+            # Ensure target is NOT in features and only keep numeric data
             if target in window_df.columns:
                 window_df = window_df.drop(columns=[target])
+            
+            # Drop non-numeric columns like 'site_id' or 'time' if they slipped in
+            window_df = window_df.select_dtypes(include=[np.number])
             
             window = window_df.values
             label = data.iloc[i + self.window_size][target]

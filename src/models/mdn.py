@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from loguru import logger
 from typing import Tuple
 
@@ -45,13 +44,41 @@ class MixtureDensityNetwork(nn.Module):
         
         return pi, sigma, mu
 
+
+def mdn_expected_value(
+    pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor
+) -> torch.Tensor:
+    """
+    Return the predictive mean of the Gaussian mixture.
+
+    Output shape: (B, O)
+    """
+    del sigma
+    return torch.sum(pi.unsqueeze(-1) * mu, dim=1)
+
+
+def mdn_predictive_std(
+    pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor
+) -> torch.Tensor:
+    """
+    Return the predictive standard deviation of the Gaussian mixture.
+
+    Output shape: (B, O)
+    """
+    mean = mdn_expected_value(pi, sigma, mu)
+    second_moment = torch.sum(pi.unsqueeze(-1) * (sigma.pow(2) + mu.pow(2)), dim=1)
+    variance = torch.clamp(second_moment - mean.pow(2), min=1e-6)
+    return torch.sqrt(variance)
+
 def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: torch.Tensor, entropy_weight: float = 0.01):
     """
     Negative Log Likelihood (NLL) Loss for MDN with Entropy Regularization.
     target: (B, O)
     """
     # target reshaped to (B, 1, O) to broadcast with (B, K, O)
-    target = target.unsqueeze(1).expand_as(mu)
+    if target.dim() == 1:
+        target = target.unsqueeze(-1) # (B, 1)
+    target = target.unsqueeze(1).expand_as(mu) # (B, K, O)
     
     # Calculate GMM probability
     m = torch.distributions.Normal(loc=mu, scale=sigma)

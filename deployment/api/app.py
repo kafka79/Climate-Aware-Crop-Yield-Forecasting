@@ -1,9 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import torch
-import numpy as np
 import os
 from typing import List, Dict, Any
+from src.models.mdn import mdn_expected_value
 from src.models.transformer import initialize_model
 from src.utils.config import load_config
 from src.explainability.integrated_gradients import explain_prediction
@@ -59,9 +59,9 @@ async def predict(request: PredictionRequest):
         with torch.no_grad():
             output = model(sat, weather, soil)
             if isinstance(output, tuple):
-                # If MDN, pick the mean of the mixture (simplified)
+                # Use the mixture mean rather than an invalid broadcasted product.
                 pi, sigma, mu = output
-                prediction = torch.sum(pi * mu, dim=1).item()
+                prediction = mdn_expected_value(pi, sigma, mu).item()
             else:
                 prediction = output.item()
         

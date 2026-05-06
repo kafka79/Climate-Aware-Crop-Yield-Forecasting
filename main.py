@@ -1,8 +1,8 @@
-import os
-import argparse
-import yaml
+import subprocess
 from loguru import logger
 from src.utils.config import load_config
+from src.cli.parser import get_parser
+from src.inference.runtime import InferenceUnavailableError
 
 def main(args):
     """
@@ -11,12 +11,8 @@ def main(args):
     logger.info("Initializing Crop Yield Prediction Pipeline...")
     
     # Load configuration
-    if args.config:
-        config = load_config(args.config)
-        logger.info(f"Loaded config from {args.config}")
-    else:
-        logger.warning("No configuration file provided. Using defaults.")
-        config = {}
+    config = load_config(args.config)
+    logger.info(f"Loaded config from {args.config}")
 
     # Inject CLI overrides into config
     if args.region:
@@ -40,32 +36,57 @@ def main(args):
         from src.training.train import run_training_pipeline
         run_training_pipeline(args.config)
     
-    elif args.mode == "eval":
-        logger.info("Starting Model Evaluation Phase...")
-        from src.evaluation.evaluator import EvaluationManager
-        evaluator = EvaluationManager(config)
-        # Note: In a real run, a separate test_loader would be passed
-        evaluator.run()
-    
-    elif args.mode == "deploy":
-        logger.info("Starting API Deployment...")
-        import uvicorn
-        uvicorn.run("deployment.api.app:app", host="0.0.0.0", port=8000, reload=True)
+    elif args.mode == "predict":
+        logger.info("Starting Inference and Agronomy Advice Phase...")
+        from src.inference.runtime import run_inference
+
+        try:
+            result = run_inference(
+                region=args.region,
+                year=args.year,
+                crop=args.crop,
+                config_path=args.config,
+            )
+        except InferenceUnavailableError as exc:
+            logger.error(str(exc))
+            raise SystemExit(1) from exc
+
+        print("\n" + "="*50)
+        print(f"REGION: {result['region']} | YEAR: {result['year']}")
+        print(f"PREDICTED YIELD: {result['predicted_yield']:.2f} t/ha")
+        print(
+            "CONFIDENCE INTERVAL (95%): "
+            f"[{result['lower_bound']:.2f} - {result['upper_bound']:.2f}] t/ha"
+        )
+        print(f"RISK ASSESSMENT: {result['risk']}")
+        if result["historical_average"] is not None:
+            print(f"HISTORICAL AVERAGE: {result['historical_average']:.2f} t/ha")
+        if result["observed_yield"] is not None:
+            print(f"OBSERVED YIELD FOR {result['year']}: {result['observed_yield']:.2f} t/ha")
+        print("-" * 50)
+        print("MODEL ATTRIBUTION BY MODALITY:")
+        for name, score in result["attribution"].items():
+            print(f"- {name}: {score:.4f}")
+        print(f"SOIL INPUT SOURCE: {result['soil_source']}")
+        print("-" * 50)
+        print("AGRONOMIC ADVICE & RECOMMENDATIONS:")
+        for advice in result.get("recommendations", []):
+            print(f"- {advice}")
+        print("="*50 + "\n")
+
+    elif args.mode == "benchmark":
+        logger.info("Starting Model Benchmarking...")
+        from src.training.train import run_benchmark_pipeline
+        run_benchmark_pipeline(args.config)
+
+    elif args.mode == "dashboard":
+        logger.info("Launching Streamlit Dashboard...")
+        subprocess.run(["streamlit", "run", "app.py"])
 
     else:
         logger.error(f"Unknown mode: {args.mode}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Crop Yield Prediction Pipeline")
-    parser.add_argument("--mode", type=str, default="train", 
-                        choices=["download", "preprocess", "train", "eval", "deploy"],
-                        help="Pipeline phase to execute.")
-    parser.add_argument("--config", type=str, default="configs/data_config.yaml",
-                        help="Path to YAML configuration file.")
-    parser.add_argument("--year", type=int, default=2023,
-                        help="Target year for analysis.")
-    parser.add_argument("--region", type=str,
-                        help="Target region (e.g., 'Punjab', 'Iowa').")
-    
+    parser = get_parser()
     args = parser.parse_args()
     main(args)

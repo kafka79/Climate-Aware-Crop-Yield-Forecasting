@@ -2,7 +2,7 @@ import torch
 import torch.optim as optim
 from loguru import logger
 from tqdm import tqdm
-from typing import Dict, Any, List
+from typing import Dict, Any
 import os
 
 class TrainManager:
@@ -100,3 +100,7 @@ class TrainManager:
                 logger.info(f"New best model saved to {ckpt_file} with Val Loss: {val_loss:.4f}")
                 
         logger.success("Training run complete.")
+        return {
+            "best_val_loss": best_val_loss,
+            "epochs": self.config["num_epochs"],
+        }

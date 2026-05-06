@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 from loguru import logger
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
+from src.models.mdn import MixtureDensityNetwork
 
 class MultiModalTransformer(nn.Module):
     """
@@ -38,8 +39,12 @@ class MultiModalTransformer(nn.Module):
         self.cross_attn = nn.MultiheadAttention(embed_dim=self.config["hidden_dim"], 
                                                 num_heads=self.config["num_heads"])
         
-        # Output Head
-        self.fc = nn.Linear(self.config["hidden_dim"], 1) # Single output (Yield)
+        # MDN Output Head instead of simple Linear
+        self.mdn_head = MixtureDensityNetwork(
+            input_dim=self.config["hidden_dim"], 
+            num_mixtures=config["mdn"]["num_mixtures"],
+            output_dim=config["mdn"]["output_dim"]
+        )
 
     def forward(self, sat, weather, soil):
         """
@@ -73,8 +78,8 @@ class MultiModalTransformer(nn.Module):
         # 4. Global Average Pooling over time/modalities
         out = torch.mean(out, dim=1)
         
-        # 5. Output
-        return self.fc(out)
+        # 5. MDN Output
+        return self.mdn_head(out)
 
 def initialize_model(config: Dict[str, Any]):
     """

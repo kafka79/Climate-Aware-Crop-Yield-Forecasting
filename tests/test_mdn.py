@@ -1,7 +1,12 @@
 import pytest
 import torch
 import numpy as np
-from src.models.mdn import MixtureDensityNetwork, mdn_loss
+from src.models.mdn import (
+    MixtureDensityNetwork,
+    mdn_expected_value,
+    mdn_loss,
+    mdn_predictive_std,
+)
 
 @pytest.fixture
 def mdn_model():
@@ -38,3 +43,20 @@ def test_mdn_loss_is_scalar(mdn_model):
     loss = mdn_loss(pi, sigma, mu, target)
     assert loss.shape == (), f"Loss must be a scalar, got shape {loss.shape}"
     assert not torch.isnan(loss), "Loss must not be NaN"
+
+def test_mdn_expected_value_matches_manual_weighting():
+    pi = torch.tensor([[0.25, 0.75]], dtype=torch.float32)
+    sigma = torch.tensor([[[0.2], [0.4]]], dtype=torch.float32)
+    mu = torch.tensor([[[2.0], [4.0]]], dtype=torch.float32)
+
+    expected = mdn_expected_value(pi, sigma, mu)
+    assert torch.allclose(expected, torch.tensor([[3.5]]))
+
+def test_mdn_predictive_std_is_positive():
+    pi = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
+    sigma = torch.tensor([[[0.2], [0.3]]], dtype=torch.float32)
+    mu = torch.tensor([[[1.0], [1.4]]], dtype=torch.float32)
+
+    std = mdn_predictive_std(pi, sigma, mu)
+    assert std.shape == (1, 1)
+    assert torch.all(std > 0)

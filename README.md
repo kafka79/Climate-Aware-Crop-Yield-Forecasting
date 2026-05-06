@@ -1,153 +1,114 @@
-# 🌾 Climate-Aware Probabilistic Crop Yield Forecasting
+# Climate-Aware Probabilistic Crop Yield Forecasting
 
-![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python) ![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red?logo=pytorch) ![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green?logo=fastapi) ![Docker](https://img.shields.io/badge/Docker-Compose-blue?logo=docker) ![Tests](https://img.shields.io/badge/Tests-8%20Passing-brightgreen?logo=pytest) ![License](https://img.shields.io/badge/License-MIT-yellow)
+This repository is a working ML prototype for crop-yield forecasting with uncertainty, built around a multi-modal PyTorch model that combines:
 
-> Predicting crop yields with **quantified uncertainty** using a Multi-Modal Transformer + Mixture Density Network — fusing Sentinel-2 satellite imagery, ERA5 weather reanalysis, and SoilGrids data.
+- Sentinel-2 satellite features
+- Weather time series
+- Soil features
+- A Transformer backbone with an MDN head
 
----
+The repo includes training code, a Streamlit dashboard, a FastAPI service, Docker support, and a pytest suite.
 
-## 🏗️ System Architecture
+## Current Status
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    INPUT MODALITIES                         │
-│                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │ Sentinel-2   │  │  ERA5 / CDS  │  │  SoilGrids       │  │
-│  │ Satellite    │  │  Weather     │  │  Soil Properties  │  │
-│  │ (B2,B3,B4,  │  │  (Tmax, Tmin,│  │  (pH, SOC,       │  │
-│  │  B8 → NDVI, │  │   Precip,    │  │   Clay, WHC)     │  │
-│  │  EVI, LSWI) │  │   GDD, SPI)  │  │                  │  │
-│  └──────┬───────┘  └──────┬───────┘  └────────┬─────────┘  │
-│         │                 │                   │             │
-└─────────┼─────────────────┼───────────────────┼────────────┘
-          │                 │                   │
-          ▼                 ▼                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│               FEATURE ENGINEERING LAYER                     │
-│  Sat Encoder (Linear)  LSTM Encoder    Soil Encoder (MLP)   │
-└─────────────────────────────────────────────────────────────┘
-          │                 │                   │
-          └─────────────────┴───────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│            MULTI-MODAL TRANSFORMER ENCODER                  │
-│     Cross-Modal Attention → 4 Layers → Global Avg Pool      │
-└─────────────────────────────────────────────────────────────┘
-                            │
-              ┌─────────────┴─────────────┐
-              ▼                           ▼
-   ┌──────────────────┐       ┌───────────────────────┐
-   │  Point Estimate  │       │  MDN Probabilistic    │
-   │  (MSE+MAE Loss)  │       │  Head (NLL Loss)      │
-   │                  │       │  π, μ, σ → GMM        │
-   └──────────────────┘       └───────────────────────┘
-              │                           │
-              └─────────────┬─────────────┘
-                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│             POST-PROCESSING & DEPLOYMENT                    │
-│  Risk Classifier → Agronomy Advisor → FastAPI → Streamlit   │
-│  Integrated Gradients XAI → Feature Attribution Report      │
-└─────────────────────────────────────────────────────────────┘
-```
+This project now draws a hard line between real artifacts and placeholder behavior:
 
----
+- `main.py --mode predict` uses the stored checkpoint and processed feature store, or exits clearly if those artifacts are not usable.
+- The Streamlit dashboard only renders a live forecast when the selected region/year has matching processed Zarr data and a checkpoint.
+- The dashboard defaults to historical context instead of simulated forecasts.
+- The FastAPI service is available in `docker-compose.yml` at `http://localhost:8000`.
 
-## 📊 Benchmark Results
+## What Is Actually Backed By Data
 
-| Model | MAE ↓ | RMSE ↓ | R² ↑ | MAPE ↓ | CRPS ↓ |
-|---|---|---|---|---|---|
-| **Baseline LSTM** (weather only) | 0.821 | 1.043 | 0.612 | 21.4% | — |
-| **Multi-Modal Transformer** | 0.473 | 0.612 | 0.841 | 11.8% | — |
-| **Transformer + MDN** *(ours)* | **0.461** | **0.598** | **0.849** | **11.2%** | **0.334** |
+Committed artifacts in this repo currently include:
 
-> The MDN head adds calibrated uncertainty quantification (CRPS) at only a 2.3% RMSE cost — a capability deterministic models fundamentally cannot provide.
+- Historical yield records in `data/raw/yield/historical_yield.csv`
+- A processed Sentinel-2 and weather feature store for `Burdwan, West Bengal` in `2023`
+- A saved checkpoint at `models/checkpoints/best_model.pth`
 
----
+Important limitation:
 
-## 🚀 Quick Start (3 Commands)
+- The committed dashboard artifacts are not crop-specific, so crop selection has been removed from the UI.
+- Not every configured study area has processed Zarr features in the repo yet.
+- The old benchmark table has been removed until a reproducible experiment report is committed alongside it.
+
+## Quick Start
+
+### 1. Install dependencies
 
 ```bash
-# 1. Install dependencies
 pip install -r requirements.txt
+```
 
-# 2. Generate synthetic data & preprocess
-python main.py --mode download
-python main.py --mode preprocess
+### 2. Run the dashboard and API
 
-# 3. Launch the full app (API + UI)
+```bash
 docker-compose up
 ```
 
-**Frontend UI:** http://localhost:8501  
-**API Docs (Swagger):** http://localhost:8000/docs
+Available services:
 
----
+- Dashboard: `http://localhost:8501`
+- API docs: `http://localhost:8000/docs`
 
-## 📁 Project Structure
+### 3. Run a CLI prediction
 
+```bash
+python main.py --mode predict --region "Burdwan, West Bengal" --year 2023
 ```
+
+If the selected region/year is missing processed artifacts, or the checkpoint output fails a plausibility guard, the command exits with a clear error instead of printing fake numbers.
+
+## Training And Reproducibility
+
+To regenerate artifacts locally:
+
+```bash
+python main.py --mode download
+python main.py --mode preprocess
+python main.py --mode train
+```
+
+Training writes:
+
+- `models/checkpoints/best_model.pth`
+- `experiments/latest_training_summary.json`
+
+The training summary captures the trained regions, number of sequences, epoch count, and best validation loss for that run.
+
+## Project Structure
+
+```text
 major-project/
-├── src/
-│   ├── data/           # Downloaders, preprocessing, fusion, imputation, bias correction
-│   ├── models/         # MultiModalTransformer, MDN, LSTM Baseline
-│   ├── features/       # NDVI, EVI, LSWI, GDD, SPI feature extractors
-│   ├── training/       # TrainManager, CropYieldLoss, training pipeline
-│   ├── evaluation/     # YieldMetrics, ProbabilisticMetrics (CRPS, PIT)
-│   ├── explainability/ # Integrated Gradients (Captum)
-│   ├── risk/           # YieldRiskClassifier with uncertainty calibration
-│   └── recommendation/ # AgronomyAdvisor — XAI to human advice
-├── deployment/
-│   ├── api/            # FastAPI backend
-│   ├── frontend/       # Streamlit dashboard
-│   └── export/         # ONNX export for mobile/edge inference
-├── configs/            # YAML config files (data, model, training)
-├── experiments/        # Experiment results (Baseline vs Transformer vs MDN)
-├── tests/              # 8 pytest unit tests
-├── notebooks/          # EDA and analysis notebooks
-├── .github/workflows/  # GitHub Actions CI (auto-runs tests on push)
-└── docker-compose.yml  # One-command deployment
+|-- app.py
+|-- main.py
+|-- configs/
+|-- data/
+|-- deployment/
+|-- experiments/
+|-- models/
+|-- notebooks/
+|-- src/
+|   |-- cli/
+|   |-- data/
+|   |-- evaluation/
+|   |-- explainability/
+|   |-- features/
+|   |-- inference/
+|   |-- models/
+|   |-- recommendation/
+|   |-- risk/
+|   |-- temporal/
+|   `-- training/
+`-- tests/
 ```
 
----
+## Tests
 
-## 🛠️ Tech Stack
-
-| Layer | Technology |
-|---|---|
-| **Deep Learning** | PyTorch 2.0+, torch.nn.Transformer, torch.distributions |
-| **Data Processing** | Xarray, Rioxarray, Rasterio, GeoPandas, NumPy, Pandas |
-| **Geospatial APIs** | SentinelHub (Sentinel-2), CDS API (ERA5), SoilGrids |
-| **Explainability** | Captum (Integrated Gradients), SHAP |
-| **Backend API** | FastAPI, Uvicorn, Pydantic |
-| **Frontend** | Streamlit, Plotly |
-| **Deployment** | Docker, Docker Compose, ONNX Runtime |
-| **Testing & CI** | Pytest, GitHub Actions |
-| **Observability** | Loguru |
-
----
-
-## 🔬 Key Innovations
-
-1. **Probabilistic Forecasting via MDN:** Unlike standard regression, the model outputs a full Gaussian Mixture distribution over yield, enabling CRPS-calibrated uncertainty bounds.
-2. **Multi-Modal Fusion:** Satellite (spatial), Weather (temporal), and Soil (static) data are fused via a Transformer with cross-modal attention.
-3. **Domain-Aware Features:** Agronomic features like Growing Degree Days (GDD) and Standardized Precipitation Index (SPI) are computed rather than raw temperatures/precipitation.
-4. **Explainable Predictions:** Integrated Gradients attribute yield predictions back to each modality and time step, converted to human-readable advice by the AgronomyAdvisor.
-
----
-
-## 🧪 Running Tests
+Run the test suite with:
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-Tests cover: NDVI/GDD maths, MDN output validity (pi sums to 1, sigma > 0), risk classification boundaries, uncertainty elevation, KNN imputation, bias correction, and sequence windowing.
-
----
-
-## 🤝 Contributing
-
-Pull requests welcome. Please ensure `pytest tests/` passes before submitting.
+The suite covers MDN behavior, feature engineering, risk classification, preprocessing utilities, temporal sequence building, and the new runtime inference/context helpers.

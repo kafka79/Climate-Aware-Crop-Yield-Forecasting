@@ -24,6 +24,7 @@ paths:
     sentinel2: "data/raw/sentinel2"
     era5: "data/raw/era5"
     yield: "data/raw/yield"
+    soil: "data/raw/soil"
   processed:
     features: "data/processed/features"
     tensors: "data/processed/tensors"

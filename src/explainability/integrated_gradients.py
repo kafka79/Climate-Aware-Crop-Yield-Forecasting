@@ -1,7 +1,8 @@
 import torch
 from loguru import logger
-from typing import Dict, Any, List
+from typing import Dict
 from captum.attr import IntegratedGradients
+from src.models.mdn import mdn_expected_value
 
 class YieldExplainer:
     """
@@ -11,7 +12,14 @@ class YieldExplainer:
     def __init__(self, model: torch.nn.Module):
         self.model = model
         self.model.eval()
-        self.ig = IntegratedGradients(self.model)
+        self.ig = IntegratedGradients(self._forward_for_explanation)
+
+    def _forward_for_explanation(self, sat: torch.Tensor, weather: torch.Tensor, soil: torch.Tensor):
+        output = self.model(sat, weather, soil)
+        if isinstance(output, tuple):
+            pi, sigma, mu = output
+            return mdn_expected_value(pi, sigma, mu)
+        return output
         
     def calculate_attributions(self, sat: torch.Tensor, weather: torch.Tensor, 
                                soil: torch.Tensor, target_idx: int = 0, steps: int = 50):

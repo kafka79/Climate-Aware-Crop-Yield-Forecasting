@@ -2,73 +2,114 @@ import xarray as xr
 import pandas as pd
 import numpy as np
 from loguru import logger
-from typing import Dict, Any, List, Tuple
-from src.temporal.sequence_builder import SequenceBuilder
+from typing import Dict, Any, Tuple, Generator
+
 
 class MultiModalFuser:
     """
-    Orchestrates the spatial-temporal alignment of Satellite, Weather, and Yield data.
-    Ensures that for every Yield observation (Space-Time), we have the corresponding
-    history of Sentinel and ERA5 features.
+    Orchestrates spatial-temporal alignment of Satellite, Weather, and Yield data.
+    Uses Zarr/Dask for lazy loading of massive datasets.
+
+    FIX: yield dates (e.g. Dec 31) that fall OUTSIDE the satellite time range are
+    no longer dropped. Instead we use the closest available window ending at or
+    before the yield date, falling back to the earliest available window when the
+    yield date precedes all satellite observations.
     """
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        
-    def fuse_by_location(self, yield_df: pd.DataFrame, sat_ds: xr.Dataset, weather_df: pd.DataFrame):
+        self.window_size = config.get("training", {}).get("window_size", 12)
+
+    def generate_lazy_sequences(
+        self,
+        yield_df: pd.DataFrame,
+        sat_ds: xr.Dataset,
+        weather_ds: xr.Dataset,
+    ) -> Generator[Tuple[np.ndarray, float], None, None]:
         """
-        Calculates the aligned feature matrix for yield prediction.
+        Yields (X, y) one sequence at a time without loading the full dataset.
+
+        Temporal alignment strategy (robust to date mismatches):
+        1. Slice everything up-to-and-including the yield date.
+        2. If that slice has fewer than window_size steps, take the FIRST
+           window_size observations instead (handles yield dates before sat range).
+        3. If the dataset has fewer than window_size observations total, skip.
         """
-        logger.info("Fusing multi-modal datasets by spatial-temporal keys...")
-        
-        fused_records = []
-        
+        logger.info("Initialising lazy multi-modal fusion generator...")
+
+        sat_times = pd.DatetimeIndex(sat_ds.time.values)
+        total_sat = len(sat_times)
+
+        if total_sat < self.window_size:
+            logger.error(
+                f"Satellite dataset has only {total_sat} time steps — "
+                f"need at least {self.window_size}. Aborting."
+            )
+            return
+
         for _, row in yield_df.iterrows():
-            lat, lon = row['lat'], row['lon']
-            time = pd.to_datetime(row['time'])
-            
-            # 1. Spatial Sampling for Satellite (Nearest Neighbor)
+            lat, lon = row["lat"], row["lon"]
+            yield_time = pd.to_datetime(row["time"])
+
             try:
                 sat_pixel = sat_ds.sel(lat=lat, lon=lon, method="nearest")
-                # Sample the history before the yield (e.g., 6 months prior)
-                sat_history = sat_pixel.sel(time=slice(time - pd.DateOffset(months=6), time))
-                
-                # 2. Spatial Sampling for Weather
-                weather_pixel = weather_df.sel(lat=lat, lon=lon, method="nearest")
-                weather_history = weather_pixel.sel(time=slice(time - pd.DateOffset(months=6), time))
-                
-                # 3. Convert to Tabular for Sequence Builder
-                sat_df = sat_history.to_dataframe().drop(columns=['lat', 'lon'], errors='ignore')
-                weather_df_pix = weather_history.to_dataframe().drop(columns=['lat', 'lon'], errors='ignore')
-                
-                # Align on time
-                combined = pd.merge(sat_df, weather_df_pix, left_index=True, right_index=True)
-                combined['yield'] = row['yield']
-                combined['site_id'] = row.get('site_id', 0)
-                
-                fused_records.append(combined)
-            except Exception as e:
-                logger.error(f"Failed to fuse data for record {lat}, {lon} at {time}: {e}")
-                
-        if not fused_records:
-            return pd.DataFrame()
-            
-        return pd.concat(fused_records)
+                weather_pixel = weather_ds.sel(lat=lat, lon=lon, method="nearest")
 
-def prepare_training_sequences(yield_df: pd.DataFrame, sat_ds: xr.Dataset, weather_df: pd.DataFrame, config: dict):
-    """
-    Orchestrates fusion and sequence building for Transformer input.
-    """
+                # --- Robust temporal window selection ---
+                # Strategy A: latest window_size steps up to yield_time
+                sat_hist = sat_pixel.sel(time=slice(None, yield_time)).tail(
+                    time=self.window_size
+                )
+                w_hist = weather_pixel.sel(time=slice(None, yield_time)).tail(
+                    time=self.window_size
+                )
+
+                # Strategy B fallback: if yield date is before satellite coverage,
+                # use the very FIRST window_size steps (phenologically closest season)
+                if len(sat_hist.time) < self.window_size:
+                    logger.debug(
+                        f"Yield date {yield_time.date()} is before or near start of "
+                        f"satellite coverage. Using first {self.window_size} steps as fallback."
+                    )
+                    sat_hist = sat_pixel.isel(time=slice(0, self.window_size))
+                    w_hist = weather_pixel.isel(time=slice(0, self.window_size))
+
+                # Final check — dataset truly too short
+                if len(sat_hist.time) < self.window_size:
+                    logger.warning(
+                        f"Skipping {lat},{lon} @ {yield_time.date()}: "
+                        f"only {len(sat_hist.time)} steps available."
+                    )
+                    continue
+
+                # Trigger compute for this small pixel chunk only
+                sat_data = sat_hist.to_array().values.T      # (T, F_sat)
+                w_data = w_hist.to_array().values.T           # (T, F_weather)
+
+                X = np.hstack([sat_data, w_data])             # (T, F_total)
+                yield X, float(row["yield"])
+
+            except Exception as e:
+                logger.error(f"Failed to fuse {lat},{lon} @ {yield_time}: {e}")
+
+
+def prepare_training_sequences(
+    yield_df: pd.DataFrame,
+    sat_ds: xr.Dataset,
+    weather_ds: xr.Dataset,
+    config: dict,
+):
+    """Lazy wrapper — collects generated sequences into arrays."""
     fuser = MultiModalFuser(config)
-    fused_df = fuser.fuse_by_location(yield_df, sat_ds, weather_df)
-    
-    if fused_df.empty:
-        logger.warning("Fused dataframe is empty. Cannot build sequences.")
+    X_list, y_list = [], []
+
+    for X, y in fuser.generate_lazy_sequences(yield_df, sat_ds, weather_ds):
+        X_list.append(X)
+        y_list.append(y)
+
+    if not X_list:
+        logger.warning("No valid sequences generated.")
         return None, None
-        
-    window_size = config.get('training', {}).get('window_size', 12)
-    builder = SequenceBuilder(window_size=window_size)
-    
-    X, y = builder.create_sequences(fused_df)
-    
-    logger.success(f"Prepared {len(X)} sequences for training.")
-    return X, y
+
+    logger.success(f"Prepared {len(X_list)} sequences for training.")
+    return np.array(X_list), np.array(y_list)

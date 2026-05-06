@@ -85,3 +85,15 @@ class MockDataGenerator:
         os.makedirs(self.raw_path["era5"], exist_ok=True)
         ds.to_netcdf(os.path.join(self.raw_path["era5"], f"{name}_{year}.nc"))
         logger.success(f"Mock ERA5 data generated for {name}.")
+
+    def generate_soil_csv(self, name: str):
+        logger.info(f"Generating mock soil CSV for {name}...")
+        soil_data = {
+            "ph": 6.5 + np.random.normal(0, 0.1),
+            "soc": 12.5 + np.random.normal(0, 0.5),
+            "nitrogen": 4.2 + np.random.normal(0, 0.2)
+        }
+        os.makedirs(self.raw_path["soil"], exist_ok=True)
+        target_path = os.path.join(self.raw_path["soil"], f"{name}_soil.csv")
+        pd.DataFrame([soil_data]).to_csv(target_path, index=False)
+        logger.success(f"Mock soil data generated at {target_path}.")

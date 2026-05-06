@@ -2,12 +2,12 @@
 
 transformer:
   input_dim: 5  # Matched to sample_satellite.csv (5 columns)
-  temporal_dim: 8  # Matched to sample_weather.csv (8 columns)
-  soil_dim: 4
-  hidden_dim: 256
-  num_heads: 8
-  num_layers: 4
-  dropout: 0.1
+  temporal_dim: 3  # t_max, t_min, precip
+  soil_dim: 3      # ph, soc, nitrogen
+  hidden_dim: 128   # Reduced from 256 — prevents overfitting on small datasets
+  num_heads: 4      # Matched to hidden_dim/32
+  num_layers: 2     # Shallow on small data; scale up with real data
+  dropout: 0.3      # Increased from 0.1 — primary regularisation on <100 samples
 
 mdn:
   num_mixtures: 5  # Number of Gaussian components for yield distribution

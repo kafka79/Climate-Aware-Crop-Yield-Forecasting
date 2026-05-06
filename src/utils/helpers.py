@@ -1,6 +1,6 @@
 import numpy as np
 from loguru import logger
-from typing import List, Tuple
+
 
 def rescale_bands(data: np.ndarray, scale: float = 10000.0):
     """

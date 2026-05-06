@@ -41,6 +41,7 @@ loguru
 
 # UI and XAI Details
 streamlit
+streamlit-folium
 requests
 captum
 plotly
