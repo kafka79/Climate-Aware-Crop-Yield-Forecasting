@@ -1,0 +1,18 @@
+[server]
+# Required for the PWA service worker to be served at /app/static/sw.js
+# Static files must live in ./static/ relative to the app root
+enableStaticServing = true
+maxUploadSize = 200
+
+[browser]
+# Allow service worker scope at root
+serverAddress = "localhost"
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#16a34a"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f9fafb"
+textColor = "#111827"
+font = "sans serif"

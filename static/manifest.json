@@ -1,0 +1,35 @@
+{
+  "name": "Crop Yield Forecast",
+  "short_name": "CropForecast",
+  "description": "Climate-aware crop yield forecasting for field use. Works offline with the last successful prediction cached.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#16a34a",
+  "orientation": "any",
+  "lang": "en",
+  "categories": ["agriculture", "productivity", "weather"],
+  "icons": [
+    {
+      "src": "/app/static/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/app/static/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Run Forecast",
+      "short_name": "Forecast",
+      "description": "Open the yield forecasting tool",
+      "url": "/",
+      "icons": [{ "src": "/app/static/icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}

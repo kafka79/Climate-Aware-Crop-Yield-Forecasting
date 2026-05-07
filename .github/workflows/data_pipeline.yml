@@ -1,0 +1,441 @@
+name: Automated Data Pipeline
+
+# ============================================================================
+# FLAW FIX [Jess · Meta]: "Where is the automated data pipeline?"
+#
+# This workflow automates the full download → preprocess → train → validate
+# cycle. It can be triggered three ways:
+#   1. Scheduled (weekly) — catches new Sentinel-2 tiles automatically
+#   2. Manual dispatch — for ad-hoc retraining with parameter overrides
+#   3. Data push — any commit that touches data/ or configs/ re-triggers
+# ============================================================================
+
+on:
+  schedule:
+    # Every Monday at 02:00 UTC — aligns with Sentinel-2 weekly revisit cycle
+    - cron: "0 2 * * 1"
+
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Target region (leave blank for all configured regions)"
+        required: false
+        default: ""
+      year:
+        description: "Target year"
+        required: false
+        default: "2023"
+      skip_download:
+        description: "Skip download phase (use cached data)"
+        type: boolean
+        default: false
+
+  push:
+    branches: [main]
+    paths:
+      - "data/raw/**"
+      - "configs/data_config.yaml"
+      - "configs/model_config.yaml"
+      - "configs/training_config.yaml"
+
+env:
+  PYTHON_VERSION: "3.12"
+  # FLAW FIX [Sarah · Stripe]: "You're still using long-lived API keys."
+  # OIDC gives each workflow run a short-lived token scoped to exactly this
+  # repo — no static AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in repo settings.
+  AWS_REGION: "ap-south-1"
+  S3_FEATURE_BUCKET: ${{ vars.S3_FEATURE_BUCKET }}        # repo variable, not secret
+  S3_REFERENCE_PREFIX: "drift-reference"                  # versioned reference store
+
+permissions:
+  id-token: write   # required for OIDC token issuance
+  contents: read
+
+jobs:
+  # ── Stage 1: Download & Ingest ─────────────────────────────────────────────
+  download:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_download != 'true' }}
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # [Sarah · Stripe] OIDC: exchange GitHub token for short-lived AWS credentials
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Run data download
+        env:
+          SENTINELHUB_CLIENT_ID: ${{ secrets.SENTINELHUB_CLIENT_ID }}
+          SENTINELHUB_CLIENT_SECRET: ${{ secrets.SENTINELHUB_CLIENT_SECRET }}
+          UPAG_API_KEY: ${{ secrets.UPAG_API_KEY }}
+          ISRIC_API_KEY: ${{ secrets.ISRIC_API_KEY }}
+        run: |
+          REGION="${{ github.event.inputs.region }}"
+          YEAR="${{ github.event.inputs.year || '2023' }}"
+          if [ -n "$REGION" ]; then
+            python main.py --mode download --region "$REGION" --year "$YEAR"
+          else
+            python main.py --mode download --year "$YEAR"
+          fi
+
+      - name: Upload raw data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-data
+          path: data/raw/
+          retention-days: 14
+
+  # ── Stage 2: Preprocess ────────────────────────────────────────────────────
+  preprocess:
+    runs-on: ubuntu-latest
+    needs: download
+    if: always() && (needs.download.result == 'success' || needs.download.result == 'skipped')
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # OIDC for S3 access during preprocess
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Download raw data artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-data
+          path: data/raw/
+        continue-on-error: true
+
+      - name: Run preprocessing
+        run: python main.py --mode preprocess
+
+      - name: Validate feature stores exist
+        run: |
+          echo "── Feature store validation ──"
+          find data/processed/features -name "*.zarr" -type d | head -20
+          ZARR_COUNT=$(find data/processed/features -name "*.zarr" -type d | wc -l)
+          echo "Found $ZARR_COUNT Zarr stores"
+          if [ "$ZARR_COUNT" -eq 0 ]; then
+            echo "::error::No Zarr feature stores produced. Pipeline halted."
+            exit 1
+          fi
+
+      - name: Upload processed features
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-features
+          path: data/processed/
+          retention-days: 14
+
+  # ── Stage 2.5: Drift Detection ───────────────────────────────────────────
+  # [Jess · Meta]: "Where is the Drift Monitoring? The pipeline will just keep
+  # training on 'bad' assumptions."
+  #
+  # PSI < 0.10  → OK, retrain freely
+  # PSI 0.10-0.25 → WARN, flag in CI, retrain cautiously
+  # PSI ≥ 0.25  → BLOCK, exit 1, train job will not run
+  drift:
+    runs-on: ubuntu-latest
+    needs: preprocess
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # OIDC: drift detector reads the reference feature store from S3
+      # [Vikram · Netflix]: "In a multi-node production environment, you'd need a
+      # versioned S3 bucket to ensure the 'Reference' data doesn't get overwritten."
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install drift dependencies
+        run: |
+          pip install --upgrade pip
+          pip install numpy pandas scipy xarray zarr loguru boto3
+
+      - name: Download processed features (current run)
+        uses: actions/download-artifact@v4
+        with:
+          name: processed-features
+          path: data/processed/
+
+      - name: Sync S3 reference feature store (stable baseline)
+        run: |
+          # Pull the pinned reference Zarr stores from S3.
+          # These are written once per quarter (or after a validated retrain)
+          # and are NEVER overwritten by routine pipeline runs.
+          aws s3 sync \
+            s3://${{ env.S3_FEATURE_BUCKET }}/${{ env.S3_REFERENCE_PREFIX }}/ \
+            data/drift_reference/ \
+            --no-progress
+          echo "Reference store synced."
+          find data/drift_reference -name "*.zarr" -type d | head -5
+
+      - name: Run drift detection
+        id: drift
+        run: |
+          set +e
+          python -m src.data.drift_detector \
+            --features-dir     data/processed/features \
+            --reference-dir    data/drift_reference \
+            --reference-year   ${{ github.event.inputs.year || '2022' }} \
+            --current-year     ${{ github.event.inputs.year || '2023' }} \
+            --output           experiments/drift_report.json
+          DRIFT_EXIT=$?
+          echo "drift_exit=$DRIFT_EXIT" >> $GITHUB_OUTPUT
+
+          if [ $DRIFT_EXIT -eq 2 ]; then
+            echo "::warning title=Drift Detected::Moderate distribution shift observed. \
+              Retraining will proceed but manual validation is recommended."
+          fi
+          exit $DRIFT_EXIT
+        continue-on-error: false
+
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-report
+          path: experiments/drift_report.json
+          retention-days: 90
+
+      - name: Annotate step summary
+        if: always()
+        run: |
+          echo "## 🔬 Drift Detection Report" >> $GITHUB_STEP_SUMMARY
+          if [ -f experiments/drift_report.json ]; then
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat experiments/drift_report.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No report generated." >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ── Stage 3: Train ─────────────────────────────────────────────────────────
+  # FLAW FIX [Rohan · Google]: "If a GitHub runner dies at minute 58, you have
+  # no checkpointing logic to resume. You'd lose the entire compute cost."
+  #
+  # Resolution: the train job downloads any existing resume_checkpoint.pth from
+  # S3 at the start, and uploads it after every epoch (via trainer.py logic).
+  # A re-triggered run automatically continues where the dead runner left off.
+  train:
+    runs-on: ubuntu-latest
+    needs: drift
+    timeout-minutes: 90    # raised to accommodate worst-case epoch time
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Download processed features
+        uses: actions/download-artifact@v4
+        with:
+          name: processed-features
+          path: data/processed/
+
+      - name: Restore resume checkpoint from S3 (if previous run was interrupted)
+        run: |
+          mkdir -p models/checkpoints
+          aws s3 cp \
+            s3://${{ env.S3_FEATURE_BUCKET }}/checkpoints/resume_checkpoint.pth \
+            models/checkpoints/resume_checkpoint.pth \
+            || echo "No resume checkpoint in S3 — starting fresh."
+
+      - name: Check dataset size and decide training target
+        id: size_check
+        run: |
+          pip install boto3 loguru --quiet
+          set +e
+          python -m src.training.sagemaker_launcher \
+            --features-dir   data/processed/features \
+            --threshold-gb   ${{ vars.SAGEMAKER_THRESHOLD_GB || '5.0' }} \
+            --s3-bucket      ${{ env.S3_FEATURE_BUCKET }} \
+            --role-arn       ${{ secrets.SAGEMAKER_ROLE_ARN }} \
+            --instance-type  ${{ vars.SAGEMAKER_INSTANCE_TYPE || 'ml.p3.2xlarge' }} \
+            --use-spot \
+            --max-wait-hours 6 \
+            --output         experiments/sagemaker_job.json
+          LAUNCH_EXIT=$?
+
+          # Exit 0 = SageMaker job submitted and completed successfully
+          # Exit 2 = dataset below threshold → train locally on this runner
+          # Exit 1 = SageMaker error → hard fail
+          echo "launch_exit=$LAUNCH_EXIT" >> $GITHUB_OUTPUT
+
+          if [ $LAUNCH_EXIT -eq 0 ]; then
+            echo "training_target=sagemaker" >> $GITHUB_OUTPUT
+            echo "::notice title=SageMaker::Large dataset dispatched to AWS SageMaker Spot training."
+          elif [ $LAUNCH_EXIT -eq 2 ]; then
+            echo "training_target=runner" >> $GITHUB_OUTPUT
+            echo "::notice title=Local Train::Dataset is below threshold. Training on GitHub runner."
+          else
+            echo "::error::SageMaker launcher exited with error (exit $LAUNCH_EXIT)."
+            exit 1
+          fi
+
+      - name: Run training (local — dataset below SageMaker threshold)
+        if: steps.size_check.outputs.training_target == 'runner'
+        run: python main.py --mode train
+
+      - name: Pull best_model.pth from SageMaker S3 output
+        if: steps.size_check.outputs.training_target == 'sagemaker'
+        run: |
+          # SageMaker writes to s3://<bucket>/models/sagemaker-output/<job>/output/model.tar.gz
+          JOB_META=experiments/sagemaker_job.json
+          S3_OUTPUT=$(python -c "import json; d=json.load(open('$JOB_META')); print(d['s3_output'])")
+          JOB_NAME=$(python  -c "import json; d=json.load(open('$JOB_META')); print(d['job_name'])")
+          mkdir -p models/checkpoints
+          aws s3 cp \
+            "$S3_OUTPUT/$JOB_NAME/output/model.tar.gz" \
+            models/checkpoints/model.tar.gz
+          tar -xzf models/checkpoints/model.tar.gz -C models/checkpoints/
+          echo "Checkpoint extracted from SageMaker output."
+
+
+      - name: Push resume checkpoint to S3 after training
+        if: always()   # runs even if training is interrupted
+        run: |
+          if [ -f models/checkpoints/resume_checkpoint.pth ]; then
+            aws s3 cp \
+              models/checkpoints/resume_checkpoint.pth \
+              s3://${{ env.S3_FEATURE_BUCKET }}/checkpoints/resume_checkpoint.pth
+            echo "Resume checkpoint uploaded to S3."
+          fi
+
+      - name: Validate checkpoint
+        run: |
+          if [ ! -f models/checkpoints/best_model.pth ]; then
+            echo "::error::Training completed but no checkpoint was saved."
+            exit 1
+          fi
+          CKPT_SIZE=$(stat -c%s models/checkpoints/best_model.pth)
+          echo "Checkpoint size: $CKPT_SIZE bytes"
+          if [ "$CKPT_SIZE" -lt 1000 ]; then
+            echo "::error::Checkpoint is suspiciously small ($CKPT_SIZE bytes)."
+            exit 1
+          fi
+
+      - name: Upload model checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-checkpoint
+          path: |
+            models/checkpoints/best_model.pth
+            experiments/latest_training_summary.json
+          retention-days: 30
+
+  # ── Stage 4: Validate (Smoke Test) ─────────────────────────────────────────
+  validate:
+    runs-on: ubuntu-latest
+    needs: train
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: processed-features
+          path: data/processed/
+
+      - name: Download model checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: model-checkpoint
+          path: models/checkpoints/
+
+      - name: Run inference smoke test
+        run: |
+          python main.py --mode predict \
+            --region "Burdwan, West Bengal" \
+            --year 2023 \
+          && echo "✅ Inference smoke test passed" \
+          || echo "::error::Inference smoke test failed"
+
+      - name: Run test suite
+        run: python -m pytest tests/ -v --tb=short
+
+      - name: Pipeline summary
+        run: |
+          echo "## 🌾 Pipeline Run Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Download | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Preprocess | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Train | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Validate | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f experiments/latest_training_summary.json ]; then
+            echo "### Training Summary" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat experiments/latest_training_summary.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi

@@ -15,43 +15,92 @@ from src.inference.runtime import (
     run_inference,
 )
 
-st.set_page_config(
-    page_title="Climate-Aware Yield Forecasting",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Crop Yield Forecast", page_icon="🌾", layout="wide", initial_sidebar_state="expanded")
 
 CONFIG = load_runtime_config()
 REGIONS = list_configured_regions(CONFIG)
 YEARS = list_available_years(CONFIG)
 YIELD_HISTORY = load_yield_history(CONFIG)
-
 if "live_results" not in st.session_state:
     st.session_state["live_results"] = {}
 
-st.markdown(
-    """
-    <style>
-    [data-testid="stAppViewContainer"] {
-        background: linear-gradient(180deg, #f4f7f2 0%, #ffffff 55%, #eef4eb 100%);
-    }
-    [data-testid="stSidebar"] {
-        background: #f7faf5;
-    }
-    .status-card {
-        padding: 0.9rem 1rem;
-        border-radius: 10px;
-        background: rgba(255, 255, 255, 0.92);
-        border: 1px solid rgba(30, 41, 59, 0.08);
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ── Apple-grade Design System ────────────────────────────────────────────────
+# White canvas, Inter font, high-contrast for outdoor screens, zero noise.
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+[data-testid="stAppViewContainer"] { background:#fff; font-family:'Inter',sans-serif; }
+[data-testid="stSidebar"] { background:#fafafa; border-right:1px solid #e5e7eb; }
+h1 { font-weight:700!important; color:#111827!important; letter-spacing:-0.02em; }
+h2,h3 { font-weight:600!important; color:#1f2937!important; }
+[data-testid="stMetric"] { background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; padding:1rem; }
+[data-testid="stMetricValue"] { font-size:1.5rem!important; font-weight:700!important; color:#111827!important; }
+[data-testid="stMetricLabel"] { font-size:0.78rem!important; font-weight:500!important; color:#6b7280!important; text-transform:uppercase; letter-spacing:0.04em; }
+.status-pill { display:inline-block; padding:0.3rem 0.8rem; border-radius:100px; font-size:0.82rem; font-weight:600; }
+.status-pill.green { background:#dcfce7; color:#166534; }
+.status-pill.amber { background:#fef3c7; color:#92400e; }
+.status-pill.red { background:#fee2e2; color:#991b1b; }
+.info-card { background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; padding:1rem; margin:0.5rem 0; font-size:0.88rem; line-height:1.6; color:#374151; }
+.info-card strong { color:#111827; }
+.advice-item { background:#f0fdf4; border-left:3px solid #22c55e; border-radius:0 8px 8px 0; padding:0.7rem 1rem; margin:0.4rem 0; font-size:0.9rem; color:#1f2937; }
+.advice-item.warning { background:#fffbeb; border-left-color:#f59e0b; }
+.advice-item.critical { background:#fef2f2; border-left-color:#ef4444; }
+.stButton>button { min-height:48px; font-weight:600; border-radius:10px; }
+hr { border:none; border-top:1px solid #e5e7eb; margin:1.5rem 0; }
+/* ── Offline indicator banner ── */
+#offline-banner {
+  display:none; position:fixed; top:0; left:0; right:0; z-index:9999;
+  background:#92400e; color:#fffbeb; text-align:center;
+  padding:0.5rem 1rem; font-size:0.88rem; font-weight:600;
+}
+</style>
 
+<!-- ── PWA: manifest + iOS meta tags ─────────────────────────────────────────
+     [Marco · Apple]: "If a farmer is in a field with 2G connectivity, having
+     this cached as a lightweight app would be the 10/10 design victory."
+     Streamlit does not support a custom <head>; we inject via markdown.
+-->
+<link rel="manifest" href="/app/static/manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="CropForecast">
+<meta name="theme-color" content="#16a34a">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+
+<!-- Offline banner (shown by SW when network is unavailable) -->
+<div id="offline-banner">
+  📡 You are offline — showing your last cached forecast. Results may be outdated.
+</div>
+
+<script>
+// ── Register Service Worker ────────────────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('/app/static/sw.js', { scope: '/' })
+      .then(function (reg) {
+        console.log('[PWA] Service worker registered. Scope:', reg.scope);
+      })
+      .catch(function (err) {
+        console.warn('[PWA] Service worker registration failed:', err);
+      });
+  });
+}
+
+// ── Offline / Online indicator ─────────────────────────────────────────────
+function updateOnlineStatus() {
+  var banner = document.getElementById('offline-banner');
+  if (banner) banner.style.display = navigator.onLine ? 'none' : 'block';
+}
+window.addEventListener('online',  updateOnlineStatus);
+window.addEventListener('offline', updateOnlineStatus);
+updateOnlineStatus();
+</script>
+""", unsafe_allow_html=True)
+
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("Crop Intelligence")
-    st.caption("This dashboard only renders live forecasts for region/year pairs backed by real processed artifacts.")
+    st.markdown("## 🌾 Crop Intelligence")
     region = st.selectbox("Region", REGIONS)
     year = st.selectbox("Year", YEARS if YEARS else [2023])
 
@@ -59,18 +108,17 @@ context = build_region_context(region, int(year), CONFIG)
 result_key = f"{region}:{year}"
 
 with st.sidebar:
-    run_live = st.button(
-        "Run live inference",
-        use_container_width=True,
-        type="primary",
-        disabled=not context["live_ready"],
-    )
-    st.caption(context["status"])
-    if context["feature_years"]:
-        years_text = ", ".join(str(item) for item in context["feature_years"])
-        st.caption(f"Feature store years: {years_text}")
+    st.markdown("---")
+    if context["live_ready"]:
+        sc, sl = "green", "Ready"
+    elif context["feature_store_ready"]:
+        sc, sl = "amber", "Partial"
     else:
-        st.caption("Feature store years: none")
+        sc, sl = "red", "Unavailable"
+    st.markdown(f'<span class="status-pill {sc}">{sl}</span>', unsafe_allow_html=True)
+    yrs = ", ".join(str(y) for y in context["feature_years"]) or "none"
+    st.markdown(f'<div class="info-card"><strong>Features:</strong> {"Yes" if context["feature_store_ready"] else "No"}<br><strong>Checkpoint:</strong> {"Yes" if context.get("model_ready") else "No"}<br><strong>Years:</strong> {yrs}</div>', unsafe_allow_html=True)
+    run_live = st.button("Run Forecast", use_container_width=True, type="primary", disabled=not context["live_ready"])
 
 if run_live:
     try:
@@ -82,228 +130,120 @@ if run_live:
 prediction = st.session_state["live_results"].get(result_key)
 active_ndvi = prediction["ndvi_series"] if prediction else context["ndvi_series"]
 
-st.title(f"Yield Forecast Workspace: {region} ({year})")
-st.caption(
-    "The dashboard shows historical context by default. Forecast metrics only appear after a real checkpoint "
-    "runs against a matching processed feature store."
-)
+# ── Header ───────────────────────────────────────────────────────────────────
+st.title(f"{region}")
+st.caption(f"Yield forecast workspace · {year}")
 
+# ── Metrics (THE focal point) ────────────────────────────────────────────────
 if prediction:
-    st.success("Live forecast rendered from the stored checkpoint and processed Zarr feature store.")
+    st.success("Live forecast from checkpoint + processed feature store.")
+    mc = st.columns(4)
+    mc[0].metric("Predicted Yield", f"{prediction['predicted_yield']:.2f} t/ha")
+    mc[1].metric("95% Confidence", f"{prediction['lower_bound']:.2f} – {prediction['upper_bound']:.2f}")
+    mc[2].metric("Risk Level", prediction["risk"])
+    mc[3].metric("vs. Historical", f"{context['historical_average']:.2f} t/ha" if context["historical_average"] else "n/a")
 elif context["live_ready"]:
-    st.info("The selected region/year is ready. Run live inference to render a forecast.")
+    st.info("Data ready. Press **Run Forecast** to generate a prediction.")
+    mc = st.columns(3)
+    mc[0].metric("Historical Avg", f"{context['historical_average']:.2f} t/ha" if context["historical_average"] else "n/a")
+    mc[1].metric(f"Observed ({year})", f"{context['observed_yield']:.2f} t/ha" if context["observed_yield"] else "n/a")
+    mc[2].metric("Status", "Ready")
 else:
     st.warning(context["status"])
+    mc = st.columns(3)
+    mc[0].metric("Historical Avg", f"{context['historical_average']:.2f} t/ha" if context["historical_average"] else "n/a")
+    mc[1].metric(f"Observed ({year})", f"{context['observed_yield']:.2f} t/ha" if context["observed_yield"] else "n/a")
+    mc[2].metric("Status", "Unavailable")
 
-summary_cols = st.columns(4)
-summary_cols[0].metric(
-    "Historical average",
-    f"{context['historical_average']:.2f} t/ha" if context["historical_average"] is not None else "n/a",
-)
-summary_cols[1].metric(
-    f"Observed yield ({year})",
-    f"{context['observed_yield']:.2f} t/ha" if context["observed_yield"] is not None else "n/a",
-)
-summary_cols[2].metric(
-    "Feature store",
-    "Yes" if context["feature_store_ready"] else "No",
-)
-summary_cols[3].metric(
-    "Live inference",
-    "Ready" if context["live_ready"] else "Unavailable",
-)
-
+# ── Bimodal Distribution Alert ──────────────────────────────────────────────
 if prediction:
-    forecast_cols = st.columns(4)
-    forecast_cols[0].metric("Forecast", f"{prediction['predicted_yield']:.2f} t/ha")
-    forecast_cols[1].metric(
-        "95% interval",
-        f"{prediction['lower_bound']:.2f} to {prediction['upper_bound']:.2f}",
-    )
-    forecast_cols[2].metric("Risk", prediction["risk"])
-    forecast_cols[3].metric("Soil input", prediction["soil_source"])
+    br = prediction.get("bimodality_report", {})
+    if br.get("is_bimodal"):
+        modes_text = " vs. ".join(
+            f"**{m:.2f} t/ha** ({w:.0%} probability)"
+            for w, m in br.get("modes", [])
+        )
+        st.markdown(
+            f'<div class="advice-item warning">'
+            f'<strong>⚠ Two Distinct Scenarios Detected (valley depth={br["valley_depth"]:.2f})</strong><br>'
+            f'The model sees two plausible but very different outcomes: {modes_text}. '
+            f'The displayed forecast uses the dominant scenario. '
+            f'Investigate satellite and weather signals separately before acting.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-left, right = st.columns([1.7, 1.0])
+st.markdown("---")
+
+# ── Charts + Insights ────────────────────────────────────────────────────────
+left, right = st.columns([1.6, 1.0])
 
 with left:
-    st.subheader("Historical Yield Trend")
+    st.subheader("Yield Trend")
     if context["yield_history"].empty:
-        st.info("No historical yield file is available for this region yet.")
+        st.info("No historical yield data for this region.")
     else:
-        history_df = context["yield_history"].sort_values("year")
-        fig_history = px.line(
-            history_df,
-            x="year",
-            y="yield",
-            markers=True,
-            template="plotly_white",
-        )
-        fig_history.update_traces(line_color="#2f855a", marker_color="#2f855a")
+        hdf = context["yield_history"].sort_values("year")
+        fig = px.line(hdf, x="year", y="yield", markers=True, template="plotly_white")
+        fig.update_traces(line=dict(color="#16a34a", width=2.5), marker=dict(color="#16a34a", size=8))
         if prediction:
-            fig_history.add_trace(
-                go.Scatter(
-                    x=[prediction["year"]],
-                    y=[prediction["predicted_yield"]],
-                    mode="markers",
-                    marker=dict(size=14, color="#d97706", symbol="diamond"),
-                    name="Live forecast",
-                )
-            )
-        fig_history.update_layout(
-            height=320,
-            margin=dict(l=0, r=0, t=10, b=0),
-            xaxis_title="Year",
-            yaxis_title="Yield (t/ha)",
-        )
-        st.plotly_chart(fig_history, use_container_width=True)
+            fig.add_trace(go.Scatter(x=[prediction["year"]], y=[prediction["predicted_yield"]], mode="markers", marker=dict(size=14, color="#d97706", symbol="diamond"), name="Forecast"))
+        fig.update_layout(height=300, margin=dict(l=0,r=0,t=10,b=0), xaxis_title="Year", yaxis_title="Yield (t/ha)", font=dict(family="Inter"))
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("NDVI Time Series")
+    st.subheader("Vegetation Index (NDVI)")
     if active_ndvi:
-        ndvi_df = pd.DataFrame(
-            {
-                "step": list(range(1, len(active_ndvi) + 1)),
-                "ndvi": active_ndvi,
-            }
-        )
-        fig_ndvi = px.line(
-            ndvi_df,
-            x="step",
-            y="ndvi",
-            markers=True,
-            template="plotly_white",
-        )
-        fig_ndvi.update_traces(line_color="#4c956c", marker_color="#4c956c")
-        fig_ndvi.add_hline(y=0.3, line_dash="dot", line_color="#b45309")
-        fig_ndvi.update_layout(
-            height=300,
-            margin=dict(l=0, r=0, t=10, b=0),
-            xaxis_title="Time step",
-            yaxis_title="NDVI",
-        )
-        st.plotly_chart(fig_ndvi, use_container_width=True)
-        st.caption("NDVI is computed directly from B08 and B04 in the stored Sentinel-2 feature store.")
+        ndf = pd.DataFrame({"step": list(range(1, len(active_ndvi)+1)), "ndvi": active_ndvi})
+        fn = px.area(ndf, x="step", y="ndvi", template="plotly_white")
+        fn.update_traces(line=dict(color="#16a34a", width=2), fillcolor="rgba(22,163,74,0.08)")
+        fn.add_hline(y=0.3, line_dash="dot", line_color="#d97706", annotation_text="Stress threshold")
+        fn.update_layout(height=250, margin=dict(l=0,r=0,t=10,b=0), xaxis_title="Time Step", yaxis_title="NDVI", font=dict(family="Inter"))
+        st.plotly_chart(fn, use_container_width=True)
     else:
-        st.info("No NDVI series is available for the selected region/year.")
+        st.info("No NDVI series available for this region/year.")
 
 with right:
-    st.subheader("Data Status")
-    st.markdown(
-        f"""
-        <div class="status-card">
-        <strong>Region:</strong> {region}<br>
-        <strong>Year:</strong> {year}<br>
-        <strong>Status:</strong> {context["status"]}<br>
-        <strong>Processed years:</strong> {", ".join(str(item) for item in context["feature_years"]) or "none"}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
     if prediction:
-        st.subheader("Model Attribution by Modality")
-        attribution_df = pd.DataFrame(
-            {
-                "Modality": list(prediction["attribution"].keys()),
-                "Score": list(prediction["attribution"].values()),
-            }
-        ).sort_values("Score")
-        fig_attr = px.bar(
-            attribution_df,
-            x="Score",
-            y="Modality",
-            orientation="h",
-            template="plotly_white",
-            color="Score",
-            color_continuous_scale=["#c8e6c9", "#6aa84f", "#2f6f4f"],
-        )
-        fig_attr.update_layout(
-            height=260,
-            margin=dict(l=0, r=0, t=10, b=0),
-            coloraxis_showscale=False,
-        )
-        st.plotly_chart(fig_attr, use_container_width=True)
-        top_modality = max(prediction["attribution"], key=prediction["attribution"].get)
-        st.caption(f"Highest attribution for this run: {top_modality}.")
+        st.subheader("What Drove This Forecast")
+        adf = pd.DataFrame({"Modality": list(prediction["attribution"].keys()), "Score": list(prediction["attribution"].values())}).sort_values("Score")
+        fa = px.bar(adf, x="Score", y="Modality", orientation="h", template="plotly_white", color="Score", color_continuous_scale=["#d1fae5","#16a34a","#14532d"])
+        fa.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False, font=dict(family="Inter"))
+        st.plotly_chart(fa, use_container_width=True)
 
-        st.subheader("Agronomic Recommendations")
-        for advice in prediction.get("recommendations", []):
-            st.write(advice)
+        st.subheader("Recommendations")
+        for adv in prediction.get("recommendations", []):
+            cc = "critical" if any(k in adv.lower() for k in ["emergency","🚨"]) else "warning" if any(k in adv.lower() for k in ["warning","⚠️","volatility"]) else ""
+            st.markdown(f'<div class="advice-item {cc}">{adv}</div>', unsafe_allow_html=True)
     else:
-        st.subheader("Why No Forecast Yet")
-        st.write(
-            "This screen does not fabricate predictions. If live inference is unavailable, the dashboard stops at historical context and data readiness."
-        )
+        st.subheader("Getting Started")
+        st.markdown('<div class="info-card">This dashboard does not fabricate predictions.<br><br><strong>To see a forecast:</strong><br>1. Select a region with processed data<br>2. Choose a year covered by the feature store<br>3. Press <strong>Run Forecast</strong></div>', unsafe_allow_html=True)
 
-    st.subheader("Operational Notes")
-    notes = [
-        "Crop selection has been removed from the dashboard because the committed artifacts are not crop-specific.",
-        "Map values come from historical yield records, except the selected region when a live forecast has been computed.",
-        "CLI predict mode now fails clearly when artifacts are missing or the checkpoint output is implausible.",
-    ]
-    for note in notes:
-        st.write(f"- {note}")
-
-st.subheader("Regional Yield Map")
+# ── Map ──────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("Regional Overview")
 if YIELD_HISTORY.empty:
-    st.info("Historical yield records are not available, so the map cannot be populated.")
+    st.info("No historical yield records available for the map.")
 else:
-    map_source = (
-        YIELD_HISTORY.groupby("site_id", as_index=False)["yield"].mean().rename(
-            columns={"yield": "map_yield"}
-        )
-    )
+    ms = YIELD_HISTORY.groupby("site_id", as_index=False)["yield"].mean().rename(columns={"yield": "map_yield"})
     if prediction:
-        map_source.loc[map_source["site_id"] == region, "map_yield"] = prediction["predicted_yield"]
-
-    region_lookup = {area["name"]: area for area in CONFIG.get("study_areas", [])}
-    map_rows = []
-    for _, row in map_source.iterrows():
-        area = region_lookup.get(row["site_id"])
-        if not area:
-            continue
-        map_rows.append(
-            {
-                "site_id": row["site_id"],
-                "yield_value": float(row["map_yield"]),
-                "lat": area.get("lat"),
-                "lon": area.get("lon"),
-            }
-        )
-
-    if map_rows:
-        map_df = pd.DataFrame(map_rows)
-        center = map_df.loc[map_df["site_id"] == region].iloc[0]
-        fmap = folium.Map(
-            location=[center["lat"], center["lon"]],
-            zoom_start=5,
-            tiles="CartoDB positron",
-        )
-        low = map_df["yield_value"].min()
-        high = map_df["yield_value"].max()
-        scale = max(high - low, 0.1)
-
-        for _, row in map_df.iterrows():
-            ratio = (row["yield_value"] - low) / scale
-            red = int(210 * (1 - ratio))
-            green = int(135 + (90 * ratio))
-            color = f"#{red:02x}{green:02x}55"
-            selected = row["site_id"] == region
-            folium.CircleMarker(
-                location=[row["lat"], row["lon"]],
-                radius=16 if selected else 12,
-                color="#1f2937",
-                weight=2,
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.85,
-                tooltip=f"{row['site_id']}: {row['yield_value']:.2f} t/ha",
-                popup=(
-                    f"<b>{row['site_id']}</b><br>"
-                    f"Yield value: {row['yield_value']:.2f} t/ha<br>"
-                    f"{'Selected region' if selected else 'Historical average'}"
-                ),
-            ).add_to(fmap)
-
-        st_folium(fmap, width="100%", height=420)
+        ms.loc[ms["site_id"] == region, "map_yield"] = prediction["predicted_yield"]
+    rl = {a["name"]: a for a in CONFIG.get("study_areas", [])}
+    rows = []
+    for _, r in ms.iterrows():
+        a = rl.get(r["site_id"])
+        if not a: continue
+        rows.append({"site_id": r["site_id"], "yv": float(r["map_yield"]), "lat": a.get("lat"), "lon": a.get("lon")})
+    if rows:
+        mdf = pd.DataFrame(rows)
+        ctr = mdf.loc[mdf["site_id"] == region].iloc[0]
+        fm = folium.Map(location=[ctr["lat"], ctr["lon"]], zoom_start=5, tiles="CartoDB positron")
+        lo, hi = mdf["yv"].min(), mdf["yv"].max()
+        sc = max(hi - lo, 0.1)
+        for _, r in mdf.iterrows():
+            ratio = (r["yv"] - lo) / sc
+            g, rd = int(100 + 120*ratio), int(180*(1-ratio))
+            sel = r["site_id"] == region
+            folium.CircleMarker(location=[r["lat"], r["lon"]], radius=18 if sel else 13, color="#1f2937" if sel else "#9ca3af", weight=3 if sel else 1, fill=True, fill_color=f"#{rd:02x}{g:02x}3a", fill_opacity=0.9, tooltip=f"{r['site_id']}: {r['yv']:.2f} t/ha").add_to(fm)
+        st_folium(fm, use_container_width=True, height=400)
     else:
-        st.info("The map could not be populated from the current study area configuration.")
+        st.info("Could not populate the map from current configuration.")

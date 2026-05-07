@@ -1,7 +1,8 @@
+import warnings
 import torch
 import torch.nn as nn
 from loguru import logger
-from typing import Tuple
+from typing import Dict, List, Optional, Tuple
 
 class MixtureDensityNetwork(nn.Module):
     """
@@ -69,6 +70,120 @@ def mdn_predictive_std(
     second_moment = torch.sum(pi.unsqueeze(-1) * (sigma.pow(2) + mu.pow(2)), dim=1)
     variance = torch.clamp(second_moment - mean.pow(2), min=1e-6)
     return torch.sqrt(variance)
+
+
+class BimodalDistributionWarning(UserWarning):
+    """Raised when the MDN output is bimodal and the weighted mean is unreliable."""
+
+
+def mdn_detect_bimodality(
+    pi: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    separation_threshold: float = 1.5,
+    weight_threshold: float = 0.20,
+) -> Dict[str, object]:
+    """Detect whether the mixture is bimodal and the mean falls in a probability valley.
+
+    A distribution is flagged bimodal when two or more modes are:
+      - each carrying >= weight_threshold of total probability mass, AND
+      - separated by >= separation_threshold standard deviations of the mixture.
+
+    Args:
+        pi:    (B, K)    mixing coefficients
+        sigma: (B, K, O) component std-devs
+        mu:    (B, K, O) component means
+        separation_threshold: minimum inter-mode distance in pooled-sigma units
+        weight_threshold:     minimum weight for a component to count as a mode
+
+    Returns a dict with:
+        is_bimodal:    bool
+        modes:         list of (weight, mean_t/ha) for all significant modes
+        dominant_mode: float — the mean of the highest-weight component
+        valley_depth:  float — how deep the probability valley is between the two
+                       top modes (0.0 if unimodal, 1.0 = complete separation)
+    """
+    # Work with first batch item (inference is always batch=1 in production)
+    pi_b = pi[0]          # (K,)
+    sigma_b = sigma[0]    # (K, O)
+    mu_b = mu[0]          # (K, O)
+
+    # Collect significant modes (components with enough weight)
+    significant: List[Tuple[float, float]] = []
+    for k in range(pi_b.shape[0]):
+        w = float(pi_b[k].item())
+        m = float(mu_b[k, 0].item())
+        if w >= weight_threshold:
+            significant.append((w, m))
+
+    significant.sort(key=lambda x: x[0], reverse=True)  # heaviest first
+
+    is_bimodal = False
+    valley_depth = 0.0
+    dominant_mode = float(mdn_expected_value(pi, sigma, mu)[0, 0].item())
+
+    if len(significant) >= 2:
+        top_w, top_m = significant[0]
+        sec_w, sec_m = significant[1]
+
+        # Pooled sigma of the two dominant components (first output dim)
+        pooled_sigma = float(
+            (pi_b * sigma_b[:, 0]).sum().item() + 1e-8
+        )
+        separation = abs(top_m - sec_m) / pooled_sigma
+
+        if separation >= separation_threshold:
+            is_bimodal = True
+            # Valley depth: how evenly the mass is split between the two modes
+            # 0 = one mode dominates (shallow valley), 1 = perfectly split
+            valley_depth = float(1.0 - abs(top_w - sec_w) / (top_w + sec_w + 1e-8))
+            dominant_mode = top_m  # heaviest mode, not the valley-mean
+
+    return {
+        "is_bimodal": is_bimodal,
+        "modes": significant,
+        "dominant_mode": dominant_mode,
+        "valley_depth": valley_depth,
+    }
+
+
+def mdn_safe_point_estimate(
+    pi: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    separation_threshold: float = 1.5,
+    weight_threshold: float = 0.20,
+) -> Tuple[float, Dict[str, object]]:
+    """Return a reliable point estimate, refusing to use the valley-mean when bimodal.
+
+    For unimodal distributions: returns the standard weighted mean.
+    For bimodal distributions: returns the dominant (highest-weight) mode mean
+    and emits a BimodalDistributionWarning with full diagnostic information.
+
+    Returns:
+        (point_estimate, bimodality_report)
+    """
+    report = mdn_detect_bimodality(pi, sigma, mu, separation_threshold, weight_threshold)
+
+    if report["is_bimodal"]:
+        valley_mean = float(mdn_expected_value(pi, sigma, mu)[0, 0].item())
+        dominant = report["dominant_mode"]
+        mode_list = ", ".join(
+            f"{m:.2f} t/ha (weight={w:.0%})" for w, m in report["modes"]
+        )
+        msg = (
+            f"Bimodal yield distribution detected (valley depth={report['valley_depth']:.2f}). "
+            f"Weighted mean ({valley_mean:.2f} t/ha) falls between two distinct scenarios. "
+            f"Dominant mode: {dominant:.2f} t/ha. All significant modes: [{mode_list}]. "
+            "Investigate satellite and weather signals independently for each scenario "
+            "before acting on this forecast."
+        )
+        warnings.warn(msg, BimodalDistributionWarning, stacklevel=2)
+        logger.warning(msg)
+        return dominant, report
+
+    point = float(mdn_expected_value(pi, sigma, mu)[0, 0].item())
+    return point, report
 
 def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: torch.Tensor, entropy_weight: float = 0.01):
     """

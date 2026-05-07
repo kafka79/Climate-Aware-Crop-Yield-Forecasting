@@ -1,4 +1,5 @@
 import os
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -8,7 +9,12 @@ import torch
 import xarray as xr
 
 from src.explainability.integrated_gradients import explain_prediction
-from src.models.mdn import mdn_expected_value, mdn_predictive_std
+from src.models.mdn import (
+    mdn_expected_value,
+    mdn_predictive_std,
+    mdn_safe_point_estimate,
+    BimodalDistributionWarning,
+)
 from src.models.transformer import initialize_model
 from src.risk.risk_classifier import YieldRiskClassifier
 from src.recommendation.engine import RecommendationEngine
@@ -106,17 +112,58 @@ def _align_vector_length(values: np.ndarray, target_dim: int) -> np.ndarray:
     return padded
 
 
-def _load_soil_vector(config: Dict[str, Any], region: str, soil_dim: int) -> Tuple[np.ndarray, str]:
+class MissingSoilDataWarning(UserWarning):
+    """Raised when soil data is unavailable and a zero-vector fallback is used."""
+
+
+def _load_soil_vector(
+    config: Dict[str, Any], region: str, soil_dim: int
+) -> Tuple[np.ndarray, str, List[str]]:
+    """Load soil vector with explicit failure tracking.
+
+    Returns (vector, source_label, warnings_list).  The warnings list is
+    always populated when a zero-vector fallback is used so that callers
+    can surface the degradation to the user instead of hiding it.
+    """
+    modality_warnings: List[str] = []
     soil_path = Path(config["paths"]["raw"]["soil"]) / f"{region}_soil.csv"
+
     if not soil_path.exists():
-        return np.zeros(soil_dim, dtype=np.float32), "missing -> zeros"
+        msg = (
+            f"Soil data file missing for '{region}' at {soil_path}. "
+            "Using a zero-vector fallback — the Transformer's soil attention "
+            "head will receive no signal, which may bias the forecast."
+        )
+        warnings.warn(msg, MissingSoilDataWarning, stacklevel=2)
+        from loguru import logger
+        logger.warning(msg)
+        modality_warnings.append(msg)
+        return np.zeros(soil_dim, dtype=np.float32), "MISSING → zero-vector", modality_warnings
 
     soil_df = pd.read_csv(soil_path).select_dtypes(include=[np.number])
     if soil_df.empty:
-        return np.zeros(soil_dim, dtype=np.float32), "non-numeric -> zeros"
+        msg = (
+            f"Soil file for '{region}' contains no numeric columns. "
+            "Using a zero-vector fallback — forecast may be unreliable."
+        )
+        warnings.warn(msg, MissingSoilDataWarning, stacklevel=2)
+        from loguru import logger
+        logger.warning(msg)
+        modality_warnings.append(msg)
+        return np.zeros(soil_dim, dtype=np.float32), "NON-NUMERIC → zero-vector", modality_warnings
 
     soil_values = soil_df.iloc[0].to_numpy(dtype=np.float32)
-    return _align_vector_length(soil_values, soil_dim), f"file:{soil_path.name}"
+    if np.all(soil_values == 0):
+        msg = (
+            f"Soil file for '{region}' exists but all values are zero. "
+            "This is equivalent to missing data and may skew the model."
+        )
+        warnings.warn(msg, MissingSoilDataWarning, stacklevel=2)
+        from loguru import logger
+        logger.warning(msg)
+        modality_warnings.append(msg)
+
+    return _align_vector_length(soil_values, soil_dim), f"file:{soil_path.name}", modality_warnings
 
 
 def _select_time_window(
@@ -203,7 +250,7 @@ def _prepare_model_inputs(
             f"but the checkpoint expects {weather_dim}."
         )
 
-    soil_vector, soil_source = _load_soil_vector(config, region, soil_dim)
+    soil_vector, soil_source, soil_warnings = _load_soil_vector(config, region, soil_dim)
 
     return {
         "sat_hist": sat_hist,
@@ -214,6 +261,7 @@ def _prepare_model_inputs(
         "soil_tensor": torch.tensor(soil_vector, dtype=torch.float32).unsqueeze(0),
         "soil_source": soil_source,
         "ndvi_series": _compute_ndvi_series(sat_hist),
+        "modality_warnings": soil_warnings,
     }
 
 
@@ -311,14 +359,16 @@ def run_inference(
 
     if isinstance(output, tuple):
         pi, sigma, mu = output
-        mean = mdn_expected_value(pi, sigma, mu)
+        # Use the safe estimator: detects bimodal distributions and refuses
+        # to return a valley-mean that sits between two real scenarios.
+        predicted_yield, bimodality_report = mdn_safe_point_estimate(pi, sigma, mu)
         std = mdn_predictive_std(pi, sigma, mu)
+        predicted_std = float(std.squeeze().cpu().item())
     else:
-        mean = output
-        std = torch.zeros_like(mean)
+        predicted_yield = float(output.squeeze().cpu().item())
+        predicted_std = 0.0
+        bimodality_report = {"is_bimodal": False, "modes": [], "dominant_mode": predicted_yield, "valley_depth": 0.0}
 
-    predicted_yield = float(mean.squeeze().cpu().item())
-    predicted_std = float(std.squeeze().cpu().item())
     if predicted_yield <= 0 or predicted_yield >= 15:
         raise InferenceUnavailableError(
             f"Checkpoint produced an implausible forecast ({predicted_yield:.3f} t/ha) "
@@ -360,6 +410,9 @@ def run_inference(
     lower_bound = max(0.0, predicted_yield - 1.96 * predicted_std)
     upper_bound = predicted_yield + 1.96 * predicted_std
 
+    # Surface modality warnings so the dashboard/CLI can show them
+    modality_warnings = prepared.get("modality_warnings", [])
+
     engine = RecommendationEngine(config)
     advice = engine.generate_advice({
         "predicted_yield": predicted_yield,
@@ -383,5 +436,7 @@ def run_inference(
         "ndvi_series": prepared["ndvi_series"],
         "attribution": attribution,
         "recommendations": advice,
+        "modality_warnings": modality_warnings,
+        "bimodality_report": bimodality_report,
         "source": "checkpoint+zarr",
     }

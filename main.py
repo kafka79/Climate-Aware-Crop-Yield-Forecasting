@@ -68,10 +68,30 @@ def main(args):
         for name, score in result["attribution"].items():
             print(f"- {name}: {score:.4f}")
         print(f"SOIL INPUT SOURCE: {result['soil_source']}")
+        if result.get("modality_warnings"):
+            print("-" * 50)
+            print("⚠ MODALITY WARNINGS (degraded inputs detected):")
+            for warning in result["modality_warnings"]:
+                print(f"  → {warning}")
+        br = result.get("bimodality_report", {})
+        if br.get("is_bimodal"):
+            print("-" * 50)
+            print("⚠ BIMODAL DISTRIBUTION DETECTED:")
+            print(f"  Valley depth: {br['valley_depth']:.2f}  (1.0 = perfectly split scenarios)")
+            print("  Significant scenarios:")
+            for w, m in br.get("modes", []):
+                marker = " ← displayed" if abs(m - result["predicted_yield"]) < 0.05 else ""
+                print(f"    • {m:.2f} t/ha  ({w:.0%} probability){marker}")
+            print("  The forecast shows the dominant scenario.")
+            print("  Investigate satellite + weather signals independently for each scenario.")
         print("-" * 50)
         print("AGRONOMIC ADVICE & RECOMMENDATIONS:")
         for advice in result.get("recommendations", []):
-            print(f"- {advice}")
+            try:
+                print(f"- {advice}")
+            except UnicodeEncodeError:
+                # Fallback for Windows terminals with limited character sets
+                print(f"- {advice.encode('ascii', 'replace').decode('ascii')}")
         print("="*50 + "\n")
 
     elif args.mode == "benchmark":
