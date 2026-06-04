@@ -113,7 +113,41 @@ def _align_vector_length(values: np.ndarray, target_dim: int) -> np.ndarray:
 
 
 class MissingSoilDataWarning(UserWarning):
-    """Raised when soil data is unavailable and a zero-vector fallback is used."""
+    """Raised when soil data is unavailable and a fallback is used."""
+
+
+def _compute_regional_soil_median(
+    config: Dict[str, Any], soil_dim: int, exclude_region: Optional[str] = None
+) -> Optional[np.ndarray]:
+    """Compute the median soil vector from all available regional soil files.
+
+    This provides a much better fallback than a zero-vector, because the model
+    was trained on real soil distributions (e.g., pH ~6.5, nitrogen ~4.2).
+    A zero-vector is extreme out-of-distribution and will bias attention weights.
+    """
+    soil_dir = Path(config["paths"]["raw"]["soil"])
+    if not soil_dir.exists():
+        return None
+
+    vectors: List[np.ndarray] = []
+    for soil_file in soil_dir.glob("*_soil.csv"):
+        region_name = soil_file.stem.replace("_soil", "")
+        if region_name == exclude_region:
+            continue
+        try:
+            df = pd.read_csv(soil_file).select_dtypes(include=[np.number])
+            if df.empty:
+                continue
+            vals = df.iloc[0].to_numpy(dtype=np.float32)
+            if np.all(vals == 0):
+                continue
+            vectors.append(_align_vector_length(vals, soil_dim))
+        except Exception:
+            continue
+
+    if not vectors:
+        return None
+    return np.median(np.stack(vectors), axis=0).astype(np.float32)
 
 
 def _load_soil_vector(
@@ -122,35 +156,52 @@ def _load_soil_vector(
     """Load soil vector with explicit failure tracking.
 
     Returns (vector, source_label, warnings_list).  The warnings list is
-    always populated when a zero-vector fallback is used so that callers
-    can surface the degradation to the user instead of hiding it.
+    always populated when a fallback is used so that callers can surface
+    the degradation to the user instead of hiding it.
+
+    Fallback strategy (in order of preference):
+      1. Regional historical median from other available soil files
+      2. Zero-vector (absolute last resort)
     """
+    from loguru import logger
+
     modality_warnings: List[str] = []
     soil_path = Path(config["paths"]["raw"]["soil"]) / f"{region}_soil.csv"
 
-    if not soil_path.exists():
-        msg = (
-            f"Soil data file missing for '{region}' at {soil_path}. "
-            "Using a zero-vector fallback — the Transformer's soil attention "
-            "head will receive no signal, which may bias the forecast."
-        )
-        warnings.warn(msg, MissingSoilDataWarning, stacklevel=2)
-        from loguru import logger
+    def _fallback(reason: str) -> Tuple[np.ndarray, str, List[str]]:
+        """Try regional median first, then fall back to zeros."""
+        median_vec = _compute_regional_soil_median(config, soil_dim, exclude_region=region)
+        if median_vec is not None:
+            fallback_label = "FALLBACK → regional median"
+            msg = (
+                f"Soil data issue for '{region}': {reason}. "
+                "Using the median soil vector from other regions as fallback."
+            )
+        else:
+            median_vec = np.zeros(soil_dim, dtype=np.float32)
+            fallback_label = "FALLBACK → zero-vector (no other regions available)"
+            msg = (
+                f"Soil data issue for '{region}': {reason}. "
+                "No other regional soil data available. Using zero-vector "
+                "fallback — forecast may be unreliable."
+            )
+        warnings.warn(msg, MissingSoilDataWarning, stacklevel=3)
         logger.warning(msg)
         modality_warnings.append(msg)
-        return np.zeros(soil_dim, dtype=np.float32), "MISSING → zero-vector", modality_warnings
+        return median_vec, fallback_label, modality_warnings
 
-    soil_df = pd.read_csv(soil_path).select_dtypes(include=[np.number])
+    if not soil_path.exists():
+        return _fallback(f"file missing at {soil_path}")
+
+    # Flaw 5 fix: wrap pd.read_csv in try/except so corrupted or empty files
+    # trigger the fallback instead of crashing the API with an unhandled error.
+    try:
+        soil_df = pd.read_csv(soil_path).select_dtypes(include=[np.number])
+    except Exception as exc:
+        return _fallback(f"file exists but could not be parsed ({type(exc).__name__}: {exc})")
+
     if soil_df.empty:
-        msg = (
-            f"Soil file for '{region}' contains no numeric columns. "
-            "Using a zero-vector fallback — forecast may be unreliable."
-        )
-        warnings.warn(msg, MissingSoilDataWarning, stacklevel=2)
-        from loguru import logger
-        logger.warning(msg)
-        modality_warnings.append(msg)
-        return np.zeros(soil_dim, dtype=np.float32), "NON-NUMERIC → zero-vector", modality_warnings
+        return _fallback("file contains no numeric columns")
 
     soil_values = soil_df.iloc[0].to_numpy(dtype=np.float32)
     if np.all(soil_values == 0):
@@ -159,7 +210,6 @@ def _load_soil_vector(
             "This is equivalent to missing data and may skew the model."
         )
         warnings.warn(msg, MissingSoilDataWarning, stacklevel=2)
-        from loguru import logger
         logger.warning(msg)
         modality_warnings.append(msg)
 

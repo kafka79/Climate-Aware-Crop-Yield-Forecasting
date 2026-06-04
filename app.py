@@ -74,18 +74,42 @@ hr { border:none; border-top:1px solid #e5e7eb; margin:1.5rem 0; }
 </div>
 
 <script>
-// ── Register Service Worker ────────────────────────────────────────────────
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', function () {
-    navigator.serviceWorker.register('/app/static/sw.js', { scope: '/' })
-      .then(function (reg) {
-        console.log('[PWA] Service worker registered. Scope:', reg.scope);
-      })
-      .catch(function (err) {
-        console.warn('[PWA] Service worker registration failed:', err);
-      });
-  });
-}
+// ── Register Service Worker (with iframe sandboxing safety) ───────────────
+// Browsers block SW registration inside cross-origin iframes. We detect
+// this and fall back gracefully instead of silently failing.
+(function () {
+  // 1. Check if we are inside a cross-origin iframe
+  var isEmbedded = false;
+  try {
+    isEmbedded = window.self !== window.top;
+    // Accessing window.top.location will throw if cross-origin
+    if (isEmbedded) { void window.top.location.hostname; }
+  } catch (e) {
+    // Cross-origin iframe detected — SW registration will be blocked
+    console.warn(
+      '[PWA] Running inside a cross-origin iframe. ' +
+      'Service Worker registration is not supported in this context. ' +
+      'Deploy as a standalone page for offline capability.'
+    );
+    isEmbedded = true;
+  }
+
+  if (!isEmbedded && 'serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      // Use a relative scope so it works regardless of base path
+      var swUrl = '/app/static/sw.js';
+      navigator.serviceWorker.register(swUrl, { scope: './' })
+        .then(function (reg) {
+          console.log('[PWA] Service worker registered. Scope:', reg.scope);
+        })
+        .catch(function (err) {
+          console.warn('[PWA] Service worker registration failed:', err);
+        });
+    });
+  } else if (!('serviceWorker' in navigator)) {
+    console.warn('[PWA] Service Workers not supported in this browser.');
+  }
+})();
 
 // ── Offline / Online indicator ─────────────────────────────────────────────
 function updateOnlineStatus() {

@@ -61,11 +61,12 @@ def _psi(reference: np.ndarray, current: np.ndarray, bins: int = 10) -> float:
 # ── KS test ──────────────────────────────────────────────────────────────────
 
 def _ks_pvalue(reference: np.ndarray, current: np.ndarray) -> float:
-    """Two-sample Kolmogorov-Smirnov p-value (pure NumPy implementation).
+    """Two-sample Kolmogorov-Smirnov p-value via scipy.
 
     Returns p-value (float). Lower = more evidence of distribution shift.
+    Requires scipy; callers should handle ImportError if scipy is absent.
     """
-    from scipy.stats import ks_2samp  # optional; falls back to PSI-only if absent
+    from scipy.stats import ks_2samp
     stat, p = ks_2samp(reference, current)
     return float(p)
 

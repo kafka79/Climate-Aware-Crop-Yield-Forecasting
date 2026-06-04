@@ -1,9 +1,12 @@
+import os
+import signal
+import threading
+
 import torch
 import torch.optim as optim
 from loguru import logger
 from tqdm import tqdm
 from typing import Any, Dict, Optional
-import os
 
 
 class TrainManager:
@@ -48,12 +51,57 @@ class TrainManager:
         self._start_epoch: int = 0
         self._best_val_loss: float = float("inf")
 
+        # Spot termination handling: when AWS sends SIGTERM (2-min warning),
+        # the handler sets this flag so the training loop can save state
+        # before the container is killed.
+        self._termination_requested = threading.Event()
+        self._save_path: Optional[str] = None
+        self._current_epoch: int = 0
+        self._register_spot_termination_handler()
+
+    # ── Spot termination handler ──────────────────────────────────────────────
+
+    def _register_spot_termination_handler(self) -> None:
+        """Register a SIGTERM handler for AWS Spot Instance termination.
+
+        When AWS reclaims a Spot Instance it sends SIGTERM with ~2 minutes
+        of grace time.  This handler immediately writes an emergency
+        checkpoint so no more than the current batch is lost.
+        """
+        def _handle_sigterm(signum, frame):
+            logger.warning(
+                "SIGTERM received (likely Spot termination). "
+                "Saving emergency checkpoint before shutdown..."
+            )
+            self._termination_requested.set()
+            if self._save_path:
+                self._save_resume_checkpoint(
+                    self._save_path, self._current_epoch, self._best_val_loss
+                )
+                logger.warning(
+                    f"Emergency checkpoint saved at epoch {self._current_epoch + 1}. "
+                    "Next run will auto-resume from here."
+                )
+
+        try:
+            signal.signal(signal.SIGTERM, _handle_sigterm)
+            logger.debug("SIGTERM handler registered for Spot termination safety.")
+        except (OSError, ValueError):
+            # signal.signal can only be called from the main thread;
+            # in worker threads we skip registration silently.
+            pass
+
     # ── Training / Validation loops ───────────────────────────────────────────
 
     def train_epoch(self, dataloader):
         self.model.train()
         total_loss = 0
         for batch in tqdm(dataloader, desc="Training"):
+            # Check if Spot termination was requested between batches
+            if self._termination_requested.is_set():
+                logger.warning("Spot termination flag set — aborting epoch early.")
+                break
+
             sat     = batch["sat"].to(self.device)
             weather = batch["weather"].to(self.device)
             soil    = batch["soil"].to(self.device)
@@ -72,7 +120,8 @@ class TrainManager:
             self.optimizer.step()
             total_loss += loss.item()
 
-        return total_loss / len(dataloader)
+        num_batches = max(len(dataloader), 1)
+        return total_loss / num_batches
 
     def validate(self, dataloader):
         self.model.eval()
@@ -138,6 +187,7 @@ class TrainManager:
     def run(self, train_loader, val_loader):
         save_path = self.config.get("save_path", "models/checkpoints")
         os.makedirs(save_path, exist_ok=True)
+        self._save_path = save_path  # expose to SIGTERM handler
 
         # Auto-resume if a previous run was interrupted
         resumed_epoch = self._load_resume_checkpoint(save_path)
@@ -154,6 +204,15 @@ class TrainManager:
             logger.info(f"Starting training on {self.device}...")
 
         for epoch in range(start_epoch, num_epochs):
+            self._current_epoch = epoch  # expose to SIGTERM handler
+
+            # If Spot termination was requested, stop training gracefully
+            if self._termination_requested.is_set():
+                logger.warning(
+                    f"Spot termination requested — stopping at epoch {epoch + 1}."
+                )
+                break
+
             train_loss = self.train_epoch(train_loader)
             val_loss   = self.validate(val_loader)
             self.scheduler.step(val_loss)
