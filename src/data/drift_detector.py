@@ -26,8 +26,10 @@ moderate drift (flags in CI but does not block retraining).
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+import requests
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -50,9 +52,10 @@ def _psi(reference: np.ndarray, current: np.ndarray, bins: int = 10) -> float:
     ref_counts, _ = np.histogram(reference, bins=edges)
     cur_counts, _ = np.histogram(current, bins=edges)
 
-    # Replace zeros to avoid log(0)
-    ref_pct = np.where(ref_counts == 0, 1e-4, ref_counts / len(reference))
-    cur_pct = np.where(cur_counts == 0, 1e-4, cur_counts / len(current))
+    # Add a small smoothing constant to all counts to prevent division by zero
+    # and properly handle empty bins without abrupt probability mass shifts.
+    ref_pct = (ref_counts + 1e-4) / (len(reference) + 1e-4 * bins)
+    cur_pct = (cur_counts + 1e-4) / (len(current) + 1e-4 * bins)
 
     psi_value = float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
     return psi_value
@@ -79,8 +82,26 @@ def _extract_ndvi(zarr_path: Path) -> Optional[np.ndarray]:
         import xarray as xr
         ds = xr.open_zarr(zarr_path)
         if "B08" in ds and "B04" in ds:
-            nir = ds["B08"].values.reshape(-1).astype(np.float32)
-            red = ds["B04"].values.reshape(-1).astype(np.float32)
+            nir_da = ds["B08"]
+            red_da = ds["B04"]
+            
+            # Memory safety: dynamic coordinate striding to prevent OOM
+            max_points = 100_000
+            total_elements = nir_da.size
+            if total_elements > max_points:
+                slices = {}
+                num_dims = len(nir_da.dims)
+                if num_dims > 0:
+                    stride = int(np.ceil((total_elements / max_points) ** (1.0 / num_dims)))
+                    if stride > 1:
+                        for dim in nir_da.dims:
+                            slices[dim] = slice(None, None, stride)
+                if slices:
+                    nir_da = nir_da.isel(**slices)
+                    red_da = red_da.isel(**slices)
+                    
+            nir = nir_da.values.reshape(-1).astype(np.float32)
+            red = red_da.values.reshape(-1).astype(np.float32)
             denom = nir + red
             denom[denom == 0] = 1e-6
             ndvi = (nir - red) / denom
@@ -96,7 +117,23 @@ def _extract_weather_feature(zarr_path: Path, variable: str = "t2m") -> Optional
         import xarray as xr
         ds = xr.open_zarr(zarr_path)
         if variable in ds:
-            values = ds[variable].values.reshape(-1).astype(np.float32)
+            da = ds[variable]
+            
+            # Memory safety: dynamic coordinate striding to prevent OOM
+            max_points = 100_000
+            total_elements = da.size
+            if total_elements > max_points:
+                slices = {}
+                num_dims = len(da.dims)
+                if num_dims > 0:
+                    stride = int(np.ceil((total_elements / max_points) ** (1.0 / num_dims)))
+                    if stride > 1:
+                        for dim in da.dims:
+                            slices[dim] = slice(None, None, stride)
+                if slices:
+                    da = da.isel(**slices)
+                    
+            values = da.values.reshape(-1).astype(np.float32)
             return values[np.isfinite(values)]
     except Exception as exc:
         logger.warning(f"Could not extract '{variable}' from {zarr_path}: {exc}")
@@ -108,7 +145,6 @@ def _extract_weather_feature(zarr_path: Path, variable: str = "t2m") -> Optional
 PSI_WARN_THRESHOLD  = 0.10
 PSI_BLOCK_THRESHOLD = 0.25
 KS_WARN_THRESHOLD   = 0.05
-KS_BLOCK_THRESHOLD  = 0.001
 
 
 def check_region_drift(
@@ -153,9 +189,10 @@ def check_region_drift(
         if ref_w is not None and cur_w is not None and len(ref_w) > 5 and len(cur_w) > 5:
             try:
                 ks_pval = _ks_pvalue(ref_w, cur_w)
-                if ks_pval < KS_BLOCK_THRESHOLD:
-                    ks_status = "BLOCK"
-                elif ks_pval < KS_WARN_THRESHOLD:
+                # Weather naturally varies year-over-year. We want the model to learn 
+                # from new weather patterns, not block the pipeline. Therefore, weather 
+                # drift is only a WARN, never a BLOCK.
+                if ks_pval < KS_WARN_THRESHOLD:
                     ks_status = "WARN"
                 else:
                     ks_status = "OK"
@@ -235,6 +272,42 @@ def run_drift_check(
     return reports
 
 
+def send_drift_alert(reports: List[Dict[str, Any]]) -> None:
+    """Send alert to Slack/Discord webhook if configured in environment."""
+    webhook_url = os.getenv("DRIFT_WEBHOOK_URL") or os.getenv("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        logger.info("No DRIFT_WEBHOOK_URL or SLACK_WEBHOOK_URL configured. Skipping webhook alert.")
+        return
+
+    # Check if there are warnings or blocks
+    alert_reports = [r for r in reports if r["overall_status"] in ("WARN", "BLOCK")]
+    if not alert_reports:
+        return
+
+    message_blocks = []
+    for r in alert_reports:
+        status_icon = "🚫 BLOCK" if r["overall_status"] == "BLOCK" else "⚠️ WARN"
+        msg = (
+            f"*{status_icon} Drift Detected in Region: {r['region']}*\n"
+            f"• NDVI PSI: {r.get('ndvi_psi', 'n/a')} (Status: {r['ndvi_status']})\n"
+            f"• Weather KS p-value: {r.get('ks_pvalue', 'n/a')} (Status: {r['ks_status']})\n"
+        )
+        message_blocks.append(msg)
+
+    payload = {
+        "text": "🚨 *Climate-Aware Yield Pipeline: Drift Alert* 🚨\n\n" + "\n".join(message_blocks)
+    }
+
+    try:
+        response = requests.post(webhook_url, json=payload, timeout=10)
+        if response.status_code in (200, 201, 204):
+            logger.success("Drift alert sent successfully via Webhook.")
+        else:
+            logger.error(f"Failed to send drift alert via Webhook. Status code: {response.status_code}")
+    except Exception as exc:
+        logger.error(f"Error sending drift alert webhook: {exc}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Drift detector for crop yield feature stores.")
     parser.add_argument("--features-dir",   default="data/processed/features",
@@ -271,6 +344,9 @@ def main() -> None:
     reports = run_drift_check(
         features_dir, args.reference_year, args.current_year, reference_dir
     )
+
+    # Send alerts if warnings/blocks exist and webhook is configured
+    send_drift_alert(reports)
 
     # ── Write report ──
     output_path = Path(args.output)

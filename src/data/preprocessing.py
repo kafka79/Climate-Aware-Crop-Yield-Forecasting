@@ -99,25 +99,23 @@ class DataPreprocessor:
         sat_ds = sat_ds.sel(time=common_times)
         weather_ds = weather_ds.sel(time=common_times)
         
-        # 2. Spatial Alignment (Regrid weather to match satellite resolution)
-        # Using bilinear interpolation for smoother, physically consistent weather fields.
-        logger.debug(f"Interpolating weather ({len(weather_ds.lat)}x{len(weather_ds.lon)}) to satellite resolution ({len(sat_ds.lat)}x{len(sat_ds.lon)})...")
-        weather_ds_respaced = weather_ds.interp(
-            lat=sat_ds.lat, 
-            lon=sat_ds.lon, 
-            method="linear"
-        ).fillna(0)
+        # 2. Spatial Alignment (Skipped)
+        # We leave weather and satellite data at their native resolutions.
+        # fusion.py handles spatial matching via .sel(lat, lon, method="nearest").
+        logger.debug("Skipping spatial interpolation to preserve native resolution.")
         
         logger.success("Fusion-ready alignment complete.")
-        return sat_ds, weather_ds_respaced
+        return sat_ds, weather_ds
 
 def preprocess_all(config: Dict[str, Any]):
     """
     Main function to execute the preprocessing pipeline across all study areas.
     """
+    import dask
     preprocessor = DataPreprocessor(config)
     
-    for area in config.get("study_areas", []):
+    @dask.delayed
+    def process_area(area):
         name = area["name"]
         sat_file = os.path.join(config["paths"]["raw"]["sentinel2"], f"{name}.nc")
         weather_file = os.path.join(config["paths"]["raw"]["era5"], f"{name}_2023.nc")
@@ -141,5 +139,8 @@ def preprocess_all(config: Dict[str, Any]):
                 os.makedirs(out_dir, exist_ok=True)
                 final_sat.to_zarr(os.path.join(out_dir, f"{name}_sat_proc.zarr"), mode="w")
                 final_weather.to_zarr(os.path.join(out_dir, f"{name}_weather_proc.zarr"), mode="w")
+                
+    tasks = [process_area(area) for area in config.get("study_areas", [])]
+    dask.compute(*tasks)
                 
     logger.success("Preprocessing phase complete.")

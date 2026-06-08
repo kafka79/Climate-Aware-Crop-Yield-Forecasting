@@ -13,6 +13,7 @@ import os
 import pandas as pd
 import numpy as np
 from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 
 try:
@@ -37,17 +38,32 @@ class SoilDownloader(DataDownloader):
         super().__init__(config)
         self.soil_vars = ["phh2o", "soc", "nitrogen"]
 
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=60))
     def download(self, bbox: List[float], name: str):
         logger.info(f"Fetching ISRIC Soil data for {name}...")
-        # Placeholder for real REST API call to SoilGrids
-        # e.g., https://rest.isric.org/soilgrids/v2.0/properties/query
+        import requests
+        lon_center = (bbox[0] + bbox[2]) / 2.0
+        lat_center = (bbox[1] + bbox[3]) / 2.0
         
-        # Synthetic soil data for demonstration
-        soil_data = {
-            "ph": 6.5 + np.random.normal(0, 0.1),
-            "soc": 12.5 + np.random.normal(0, 0.5),
-            "nitrogen": 4.2 + np.random.normal(0, 0.2)
-        }
+        try:
+            url = f"https://rest.isric.org/soilgrids/v2.0/properties/query?lon={lon_center}&lat={lat_center}&property=phh2o&property=soc&property=nitrogen&depth=0-5cm&value=mean"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            props = data.get("properties", {}).get("layers", [])
+            soil_data = {"ph": 0.0, "soc": 0.0, "nitrogen": 0.0}
+            for layer in props:
+                prop_name = layer.get("name")
+                mean_val = layer.get("depths", [{}])[0].get("values", {}).get("mean", 0.0)
+                if prop_name == "phh2o":
+                    soil_data["ph"] = mean_val / 10.0 # ISRIC pH is scaled by 10
+                elif prop_name == "soc":
+                    soil_data["soc"] = mean_val / 10.0 # dg/kg to g/kg
+                elif prop_name == "nitrogen":
+                    soil_data["nitrogen"] = mean_val / 100.0 # cg/kg to g/kg
+        except Exception as e:
+            logger.error(f"ISRIC API failed: {e}. Falling back to default zeros.")
+            soil_data = {"ph": 0.0, "soc": 0.0, "nitrogen": 0.0}
         target_path = os.path.join(self.raw_path["soil"], f"{name}_soil.csv")
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         pd.DataFrame([soil_data]).to_csv(target_path, index=False)
@@ -67,14 +83,10 @@ class UPAgDownloader(DataDownloader):
     def download_yield_data(self, state: str, crop: str, year_range: Tuple[int, int]):
         logger.info(f"Fetching UPAg APY data for {crop} in {state} ({year_range})...")
         if self.api_key == "YOUR_API_KEY":
-            logger.warning("UPAg API key is missing. Generating synthetic yield data for demonstration.")
-            data = []
-            for y in range(year_range[0], year_range[1] + 1):
-                data.append({"year": y, "state": state, "crop": crop, "yield": 2.5 + np.random.normal(0, 0.2)})
-            return pd.DataFrame(data)
+            raise ValueError("UPAg API key is missing. Set UPAG_API_KEY environment variable. Mock generation is disabled for production.")
         
         # Real API call placeholder
-        return pd.DataFrame()
+        raise NotImplementedError("Actual UPAg API integration requires production credentials.")
 
     def download(self, region: str, crop: str, year_range: Tuple[int, int]):
         return self.download_yield_data(region, crop, year_range)
@@ -89,6 +101,7 @@ class SentinelHubDownloader(DataDownloader):
         self.sh_config.sh_client_id = config['sentinel_hub']['client_id']
         self.sh_config.sh_client_secret = config['sentinel_hub']['client_secret']
         
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=10, max=120))
     def download_tile(self, bbox: List[float], time_range: Tuple[str, str], evalscript: str, output_path: str):
         logger.info(f"Initiating SentinelHub request for bbox {bbox}...")
         sh_bbox = BBox(bbox=bbox, crs=CRS.WGS84)
@@ -129,6 +142,7 @@ class ERA5Downloader(DataDownloader):
         super().__init__(config)
         self.cds_client = cdsapi.Client() if cdsapi else None
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=10, max=120))
     def download(self, bbox: List[float], year: int, name: str):
         if not self.cds_client:
             logger.error("CDS API client not available.")
@@ -137,21 +151,21 @@ class ERA5Downloader(DataDownloader):
         logger.info(f"Downloading ERA5 data for {year} in {name}...")
         target_path = os.path.join(self.raw_path["era5"], f"{name}_{year}.nc")
         
-        # self.cds_client.retrieve(
-        #     'reanalysis-era5-single-levels',
-        #     {
-        #         'product_type': 'reanalysis',
-        #         'variable': ['2m_temperature', 'total_precipitation'],
-        #         'year': str(year),
-        #         'month': [str(m).zfill(2) for m in range(1, 13)],
-        #         'day': [str(d).zfill(2) for d in range(1, 32)],
-        #         'time': [f"{h:02d}:00" for h in range(24)],
-        #         'area': [bbox[3], bbox[0], bbox[1], bbox[2]],
-        #         'format': 'netcdf',
-        #     },
-        #     target_path
-        # )
-        logger.success(f"ERA5 download simulated for {target_path}")
+        self.cds_client.retrieve(
+            'reanalysis-era5-single-levels',
+            {
+                'product_type': 'reanalysis',
+                'variable': ['2m_temperature', 'total_precipitation'],
+                'year': str(year),
+                'month': [str(m).zfill(2) for m in range(1, 13)],
+                'day': [str(d).zfill(2) for d in range(1, 32)],
+                'time': [f"{h:02d}:00" for h in range(24)],
+                'area': [bbox[3], bbox[0], bbox[1], bbox[2]],
+                'format': 'netcdf',
+            },
+            target_path
+        )
+        logger.success(f"ERA5 download completed for {target_path}")
 
 def download_multi_modal_batch(config: Dict[str, Any], region: str, crop: str):
     """

@@ -124,12 +124,17 @@ def _compute_regional_soil_median(
     This provides a much better fallback than a zero-vector, because the model
     was trained on real soil distributions (e.g., pH ~6.5, nitrogen ~4.2).
     A zero-vector is extreme out-of-distribution and will bias attention weights.
+
+    IMPORTANT: We align DataFrames by column name (via pd.concat) before
+    computing the median.  The previous implementation loaded each CSV's first
+    row with .to_numpy(), which silently produced garbage when CSVs had columns
+    in different orders (e.g., pH first in one file, nitrogen first in another).
     """
     soil_dir = Path(config["paths"]["raw"]["soil"])
     if not soil_dir.exists():
         return None
 
-    vectors: List[np.ndarray] = []
+    frames: List[pd.DataFrame] = []
     for soil_file in soil_dir.glob("*_soil.csv"):
         region_name = soil_file.stem.replace("_soil", "")
         if region_name == exclude_region:
@@ -138,16 +143,25 @@ def _compute_regional_soil_median(
             df = pd.read_csv(soil_file).select_dtypes(include=[np.number])
             if df.empty:
                 continue
-            vals = df.iloc[0].to_numpy(dtype=np.float32)
-            if np.all(vals == 0):
+            row = df.iloc[[0]]  # keep as DataFrame (1 row) to preserve column names
+            if row.to_numpy().flatten().sum() == 0:
                 continue
-            vectors.append(_align_vector_length(vals, soil_dim))
+            frames.append(row)
         except Exception:
             continue
 
-    if not vectors:
+    if not frames:
         return None
-    return np.median(np.stack(vectors), axis=0).astype(np.float32)
+
+    # pd.concat aligns by column name — if CSVs have columns in different
+    # orders, NaN fills any columns missing from a particular file.
+    combined = pd.concat(frames, ignore_index=True)
+    expected_cols = ["ph", "soc", "nitrogen"]
+    median_series = combined.median().reindex(expected_cols, fill_value=0.0)
+    median_values = median_series.to_numpy(dtype=np.float32)  # consistent column order
+    # Replace any NaN (from columns missing in some files) with 0
+    median_values = np.nan_to_num(median_values, nan=0.0)
+    return _align_vector_length(median_values, soil_dim)
 
 
 def _load_soil_vector(
@@ -203,7 +217,11 @@ def _load_soil_vector(
     if soil_df.empty:
         return _fallback("file contains no numeric columns")
 
-    soil_values = soil_df.iloc[0].to_numpy(dtype=np.float32)
+    from src.schema.validators import align_and_validate_soil
+    try:
+        soil_values = align_and_validate_soil(soil_df, soil_dim)
+    except Exception as exc:
+        return _fallback(f"schema validation failed ({type(exc).__name__}: {exc})")
     if np.all(soil_values == 0):
         msg = (
             f"Soil file for '{region}' exists but all values are zero. "
@@ -253,6 +271,24 @@ def _compute_ndvi_series(sat_hist: xr.DataArray) -> Optional[List[float]]:
 def _prepare_model_inputs(
     config: Dict[str, Any], region: str, year: int
 ) -> Dict[str, Any]:
+    import redis
+    import pickle
+    from loguru import logger
+    
+    redis_url = os.environ.get("REDIS_URL")
+    cache_key = f"crop_model_inputs:{region}:{year}"
+    r = None
+    
+    if redis_url:
+        try:
+            r = redis.from_url(redis_url)
+            cached = r.get(cache_key)
+            if cached:
+                logger.debug(f"Cache hit for {cache_key}")
+                return pickle.loads(cached)
+        except Exception as e:
+            logger.warning(f"Redis cache error (read): {e}")
+
     area = _get_region_record(config, region)
     sat_path, weather_path = _get_feature_paths(config, region)
     if not sat_path.exists() or not weather_path.exists():
@@ -302,7 +338,7 @@ def _prepare_model_inputs(
 
     soil_vector, soil_source, soil_warnings = _load_soil_vector(config, region, soil_dim)
 
-    return {
+    result = {
         "sat_hist": sat_hist,
         "sat_tensor": torch.tensor(sat_data[:, :sat_dim], dtype=torch.float32).unsqueeze(0),
         "weather_tensor": torch.tensor(
@@ -313,6 +349,15 @@ def _prepare_model_inputs(
         "ndvi_series": _compute_ndvi_series(sat_hist),
         "modality_warnings": soil_warnings,
     }
+    
+    if r is not None:
+        try:
+            r.setex(cache_key, 3600, pickle.dumps(result))
+            logger.debug(f"Cached {cache_key} for 1 hour")
+        except Exception as e:
+            logger.warning(f"Redis cache error (write): {e}")
+            
+    return result
 
 
 def build_region_context(

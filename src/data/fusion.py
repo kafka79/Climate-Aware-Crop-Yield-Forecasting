@@ -47,13 +47,20 @@ class MultiModalFuser:
             )
             return
 
-        for _, row in yield_df.iterrows():
+        lats = xr.DataArray(yield_df["lat"].values, dims="location")
+        lons = xr.DataArray(yield_df["lon"].values, dims="location")
+        
+        logger.info("Vectorizing spatial lookup for entire batch...")
+        sat_pixels = sat_ds.sel(lat=lats, lon=lons, method="nearest").load()
+        weather_pixels = weather_ds.sel(lat=lats, lon=lons, method="nearest").load()
+
+        for i, (_, row) in enumerate(yield_df.iterrows()):
             lat, lon = row["lat"], row["lon"]
             yield_time = pd.to_datetime(row["time"])
 
             try:
-                sat_pixel = sat_ds.sel(lat=lat, lon=lon, method="nearest")
-                weather_pixel = weather_ds.sel(lat=lat, lon=lon, method="nearest")
+                sat_pixel = sat_pixels.isel(location=i)
+                weather_pixel = weather_pixels.isel(location=i)
 
                 # --- Robust temporal window selection ---
                 # Strategy A: latest window_size steps up to yield_time

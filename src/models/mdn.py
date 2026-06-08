@@ -40,8 +40,10 @@ class MixtureDensityNetwork(nn.Module):
         sigma = sigma.view(-1, self.num_mixtures, self.output_dim)
         mu = mu.view(-1, self.num_mixtures, self.output_dim)
         
-        # Add epsilon for numerical stability
-        sigma = sigma + self.epsilon
+        # Enforce strict lower bound to prevent variance collapse and NaN NLL losses.
+        # Softplus alone allows sigma to approach 0 asymptotically, which causes
+        # the -log(sigma) term in the NLL loss to explode.
+        sigma = torch.clamp(sigma, min=1e-3)
         
         return pi, sigma, mu
 

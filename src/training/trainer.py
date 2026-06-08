@@ -1,5 +1,6 @@
 import os
 import signal
+import tempfile
 import threading
 
 import torch
@@ -33,6 +34,12 @@ class TrainManager:
             self.config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
         )
         self.model.to(self.device)
+        
+        # Initialize DDP if distributed process group is setup
+        if torch.distributed.is_initialized():
+            self.model = torch.nn.parallel.DistributedDataParallel(
+                self.model, device_ids=[torch.cuda.current_device()]
+            )
 
         # Optimizer & Scheduler
         self.optimizer = optim.Adam(
@@ -65,23 +72,20 @@ class TrainManager:
         """Register a SIGTERM handler for AWS Spot Instance termination.
 
         When AWS reclaims a Spot Instance it sends SIGTERM with ~2 minutes
-        of grace time.  This handler immediately writes an emergency
-        checkpoint so no more than the current batch is lost.
+        of grace time.  The handler ONLY sets a thread-safe flag — it never
+        calls torch.save or any other non-reentrant function.  Writing the
+        checkpoint is left to the main training loop, which checks the flag
+        between batches and exits cleanly.
+
+        Previous version called torch.save inside the handler, which risked
+        deadlocking the process if the signal interrupted PyTorch internals
+        or a GIL-holding operation.
         """
         def _handle_sigterm(signum, frame):
-            logger.warning(
-                "SIGTERM received (likely Spot termination). "
-                "Saving emergency checkpoint before shutdown..."
-            )
+            # CRITICAL: signal handlers run asynchronously on the main thread.
+            # Calling torch.save, logging, or any code that acquires locks
+            # here can deadlock.  We ONLY set the atomic flag.
             self._termination_requested.set()
-            if self._save_path:
-                self._save_resume_checkpoint(
-                    self._save_path, self._current_epoch, self._best_val_loss
-                )
-                logger.warning(
-                    f"Emergency checkpoint saved at epoch {self._current_epoch + 1}. "
-                    "Next run will auto-resume from here."
-                )
 
         try:
             signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -152,17 +156,50 @@ class TrainManager:
     def _save_resume_checkpoint(
         self, save_path: str, epoch: int, best_val_loss: float
     ) -> None:
-        """Write a full resumable checkpoint after every epoch."""
+        """Write a full resumable checkpoint after every epoch.
+
+        Uses atomic write (tempfile → os.replace) so a kill during the
+        write can never leave a half-written, corrupted checkpoint file.
+        """
+        # Handle DDP state dict unwrapping
+        model_state = self.model.module.state_dict() if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model.state_dict()
+        
         ckpt = {
             "epoch": epoch,
             "best_val_loss": best_val_loss,
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": model_state,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
         }
-        path = self._resume_checkpoint_path(save_path)
-        torch.save(ckpt, path)
-        logger.debug(f"Resume checkpoint saved → {path} (epoch {epoch + 1})")
+        final_path = self._resume_checkpoint_path(save_path)
+        # Write to a temp file in the same directory, then atomically rename.
+        # If the process is killed mid-write, only the temp file is corrupted;
+        # the previous valid checkpoint remains intact.
+        fd, tmp_path = tempfile.mkstemp(
+            dir=save_path, suffix=".pth.tmp", prefix="ckpt_"
+        )
+        try:
+            os.close(fd)
+            torch.save(ckpt, tmp_path)
+            os.replace(tmp_path, final_path)  # atomic on POSIX and Windows
+            logger.debug(f"Resume checkpoint saved → {final_path} (epoch {epoch + 1})")
+        except BaseException:
+            # Clean up the temp file on any failure
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+            
+        # Push to S3 if configured (Task 3: S3 Sync)
+        s3_bucket = self.config.get("s3_bucket")
+        if s3_bucket and ("LOCAL_RANK" not in os.environ or int(os.environ["LOCAL_RANK"]) == 0):
+            try:
+                import boto3
+                s3 = boto3.client('s3')
+                s3_key = f"{self.full_config.get('project_name', 'crop_yield')}/{self.RESUME_CKPT_NAME}"
+                s3.upload_file(final_path, s3_bucket, s3_key)
+                logger.debug(f"Resume checkpoint synced to s3://{s3_bucket}/{s3_key}")
+            except Exception as e:
+                logger.warning(f"Failed to sync checkpoint to S3: {e}")
 
     def _load_resume_checkpoint(self, save_path: str) -> Optional[int]:
         """If a resume checkpoint exists, restore all state and return start epoch."""
@@ -222,11 +259,17 @@ class TrainManager:
                 f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}"
             )
 
-            # Save best model weights
+            # Save best model weights (atomic write)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_path = os.path.join(save_path, "best_model.pth")
-                torch.save(self.model.state_dict(), best_path)
+                fd, tmp_best = tempfile.mkstemp(
+                    dir=save_path, suffix=".pth.tmp", prefix="best_"
+                )
+                os.close(fd)
+                model_state = self.model.module.state_dict() if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model.state_dict()
+                torch.save(model_state, tmp_best)
+                os.replace(tmp_best, best_path)
                 logger.info(
                     f"✅ New best model → {best_path} (Val Loss: {val_loss:.4f})"
                 )

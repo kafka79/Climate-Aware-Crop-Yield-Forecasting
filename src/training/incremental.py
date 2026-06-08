@@ -13,6 +13,7 @@ class IncrementalTrainer:
         self.config = config
         self.ewc_lambda = config.get("ewc_lambda", 0.4)
         self.importance = {} # Fisher information matrix
+        self.optimal_weights = {name: param.detach().clone() for name, param in self.model.named_parameters() if param.requires_grad}
 
     def compute_fisher_information(self, dataloader):
         """
@@ -20,10 +21,18 @@ class IncrementalTrainer:
         """
         logger.info("Estimating parameter importance (Fisher Information)...")
         self.model.eval()
+        device = next(self.model.parameters()).device
         for batch in dataloader:
             self.model.zero_grad()
-            sat, weather, soil = batch["sat"], batch["weather"], batch["soil"]
+            sat = batch["sat"].to(device)
+            weather = batch["weather"].to(device)
+            soil = batch["soil"].to(device)
             output = self.model(sat, weather, soil)
+            
+            if isinstance(output, tuple):
+                pi, sigma, mu = output
+                from src.models.mdn import mdn_expected_value
+                output = mdn_expected_value(pi, sigma, mu)
             
             # Simple squared gradient approximation
             loss = torch.mean(output**2)
@@ -45,7 +54,7 @@ class IncrementalTrainer:
         for name, param in self.model.named_parameters():
             if name in self.importance:
                 # distance from current param to its historical state
-                loss += (self.importance[name] * (param - param.detach()).pow(2)).sum()
+                loss += (self.importance[name] * (param - self.optimal_weights[name]).pow(2)).sum()
         return self.ewc_lambda * loss
 
     def update_model_online(self, new_batch: Dict[str, torch.Tensor], optimizer: torch.optim.Optimizer):
@@ -55,11 +64,19 @@ class IncrementalTrainer:
         self.model.train()
         optimizer.zero_grad()
         
-        sat, weather, soil = new_batch["sat"], new_batch["weather"], new_batch["soil"]
-        labels = new_batch["label"]
+        device = next(self.model.parameters()).device
+        sat = new_batch["sat"].to(device)
+        weather = new_batch["weather"].to(device)
+        soil = new_batch["soil"].to(device)
+        labels = new_batch["label"].to(device)
         
         preds = self.model(sat, weather, soil)
-        base_loss = nn.MSELoss()(preds, labels)
+        if isinstance(preds, tuple):
+            pi, sigma, mu = preds
+            from src.models.mdn import mdn_loss
+            base_loss = mdn_loss(pi, sigma, mu, labels)
+        else:
+            base_loss = nn.MSELoss()(preds, labels)
         
         total_loss = base_loss + self.ewc_loss()
         total_loss.backward()

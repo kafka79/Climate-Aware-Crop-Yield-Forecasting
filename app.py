@@ -53,72 +53,58 @@ hr { border:none; border-top:1px solid #e5e7eb; margin:1.5rem 0; }
   background:#92400e; color:#fffbeb; text-align:center;
   padding:0.5rem 1rem; font-size:0.88rem; font-weight:600;
 }
+/* ── Offline overlay to block interaction ── */
+#offline-overlay {
+  display:none; position:fixed; top:0; left:0; right:0; bottom:0; z-index:9998;
+  background:rgba(255,255,255,0.5); backdrop-filter:blur(2px);
+  cursor:not-allowed;
+}
 </style>
 
-<!-- ── PWA: manifest + iOS meta tags ─────────────────────────────────────────
-     [Marco · Apple]: "If a farmer is in a field with 2G connectivity, having
-     this cached as a lightweight app would be the 10/10 design victory."
-     Streamlit does not support a custom <head>; we inject via markdown.
--->
-<link rel="manifest" href="/app/static/manifest.json">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="CropForecast">
-<meta name="theme-color" content="#16a34a">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- ── Connectivity Monitor ────────────────────────────────────────────────
+     Streamlit is a server-side framework: every widget interaction sends a
+     WebSocket message to the Python backend.  A Service Worker that caches
+     the HTML shell is pointless — the app freezes on the first interaction
+     without a live connection.
 
-<!-- Offline banner (shown by SW when network is unavailable) -->
+     Instead of faking interactive offline capability, we prevent broken actions:
+     1. Display a top warning banner.
+     2. Dim the interface with a blur overlay to block mouse and touch clicks.
+     3. Explicitly disable HTML buttons and select options.
+-->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16a34a">
+
+<!-- Offline overlay & banner elements -->
+<div id="offline-overlay"></div>
 <div id="offline-banner">
-  📡 You are offline — showing your last cached forecast. Results may be outdated.
+  ⚠ Connection lost — Streamlit requires a live server connection to function.
+  Forecasts and controls are paused until connectivity is restored.
 </div>
 
 <script>
-// ── Register Service Worker (with iframe sandboxing safety) ───────────────
-// Browsers block SW registration inside cross-origin iframes. We detect
-// this and fall back gracefully instead of silently failing.
-(function () {
-  // 1. Check if we are inside a cross-origin iframe
-  var isEmbedded = false;
-  try {
-    isEmbedded = window.self !== window.top;
-    // Accessing window.top.location will throw if cross-origin
-    if (isEmbedded) { void window.top.location.hostname; }
-  } catch (e) {
-    // Cross-origin iframe detected — SW registration will be blocked
-    console.warn(
-      '[PWA] Running inside a cross-origin iframe. ' +
-      'Service Worker registration is not supported in this context. ' +
-      'Deploy as a standalone page for offline capability.'
-    );
-    isEmbedded = true;
-  }
-
-  if (!isEmbedded && 'serviceWorker' in navigator) {
-    window.addEventListener('load', function () {
-      // Use a relative scope so it works regardless of base path
-      var swUrl = '/app/static/sw.js';
-      navigator.serviceWorker.register(swUrl, { scope: './' })
-        .then(function (reg) {
-          console.log('[PWA] Service worker registered. Scope:', reg.scope);
-        })
-        .catch(function (err) {
-          console.warn('[PWA] Service worker registration failed:', err);
-        });
-    });
-  } else if (!('serviceWorker' in navigator)) {
-    console.warn('[PWA] Service Workers not supported in this browser.');
-  }
-})();
-
-// ── Offline / Online indicator ─────────────────────────────────────────────
 function updateOnlineStatus() {
   var banner = document.getElementById('offline-banner');
-  if (banner) banner.style.display = navigator.onLine ? 'none' : 'block';
+  var overlay = document.getElementById('offline-overlay');
+  var isOnline = navigator.onLine;
+  
+  if (banner) banner.style.display = isOnline ? 'none' : 'block';
+  if (overlay) overlay.style.display = isOnline ? 'none' : 'block';
+  
+  // Disable all input and select components in the DOM to prevent dynamic state runs
+  var inputs = document.querySelectorAll('select, button, input, textarea');
+  inputs.forEach(function(el) {
+    if (!isOnline) {
+      el.setAttribute('disabled', 'true');
+    } else {
+      el.removeAttribute('disabled');
+    }
+  });
 }
 window.addEventListener('online',  updateOnlineStatus);
 window.addEventListener('offline', updateOnlineStatus);
-updateOnlineStatus();
+// Run on startup to handle already-offline cases
+setTimeout(updateOnlineStatus, 500);
 </script>
 """, unsafe_allow_html=True)
 

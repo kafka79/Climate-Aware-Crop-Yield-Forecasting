@@ -13,7 +13,7 @@ The repo includes distributed training code, a Streamlit dashboard, a FastAPI se
 
 This project now draws a hard line between real artifacts and placeholder behavior, and implements enterprise-level scale and security:
 
-- **Offline-Capable PWA:** The Streamlit dashboard is configured as a Progressive Web App (PWA) with Service Worker caching. If a farmer is in the field with 2G connectivity, the app loads offline and serves the last successfully fetched forecast.
+- **Connection-Loss Protection:** Because Streamlit operates on a server-rendered WebSocket paradigm, true client-side offline interactivity is physically restricted. To prevent broken user actions in low-connectivity fields, the interface employs a background Javascript monitor that automatically overlays a glassmorphism blur and disables all input selectboxes, textareas, and forecast buttons the moment connectivity is lost, displaying a top-level warning banner until the WebSocket re-establishes.
 - **Bimodal Uncertainty Safety:** The MDN explicitly tracks distribution shapes. If the model outputs a bimodal distribution (e.g., conflicting drought vs. flood scenarios), the inference runtime refuses to serve a potentially misleading "valley-mean" point estimate, instead exposing the distinct dominant scenarios via the UI and CLI.
 - **Modality Validation:** If required data like soil inputs are missing, the system actively raises a `MissingSoilDataWarning` and propagates the warning state to the dashboard rather than failing silently or hallucinating values.
 
