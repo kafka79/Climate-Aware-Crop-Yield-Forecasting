@@ -16,6 +16,7 @@ rasterio
 shapely
 scipy
 scikit-learn
+pandera
 
 # Geospatial APIs
 sentinelhub

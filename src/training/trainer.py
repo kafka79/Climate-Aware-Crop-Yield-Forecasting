@@ -62,6 +62,7 @@ class TrainManager:
         # the handler sets this flag so the training loop can save state
         # before the container is killed.
         self._termination_requested = threading.Event()
+        self._active_upload_thread: Optional[threading.Thread] = None
         self._save_path: Optional[str] = None
         self._current_epoch: int = 0
         self._register_spot_termination_handler()
@@ -101,11 +102,6 @@ class TrainManager:
         self.model.train()
         total_loss = 0
         for batch in tqdm(dataloader, desc="Training"):
-            # Check if Spot termination was requested between batches
-            if self._termination_requested.is_set():
-                logger.warning("Spot termination flag set — aborting epoch early.")
-                break
-
             sat     = batch["sat"].to(self.device)
             weather = batch["weather"].to(self.device)
             soil    = batch["soil"].to(self.device)
@@ -130,6 +126,7 @@ class TrainManager:
     def validate(self, dataloader):
         self.model.eval()
         total_loss = 0
+        batches_processed = 0
         with torch.no_grad():
             for batch in dataloader:
                 sat     = batch["sat"].to(self.device)
@@ -145,8 +142,10 @@ class TrainManager:
                     loss = self.criterion(preds, labels)
 
                 total_loss += loss.item()
+                batches_processed += 1
 
-        return total_loss / len(dataloader)
+        denom = max(batches_processed, 1)
+        return total_loss / denom
 
     # ── Checkpoint helpers ────────────────────────────────────────────────────
 
@@ -189,17 +188,30 @@ class TrainManager:
                 os.remove(tmp_path)
             raise
             
-        # Push to S3 if configured (Task 3: S3 Sync)
+        # Push to S3 if configured (Task 3: S3 Sync) - Asynchronously in background with ordering safety
         s3_bucket = self.config.get("s3_bucket")
         if s3_bucket and ("LOCAL_RANK" not in os.environ or int(os.environ["LOCAL_RANK"]) == 0):
-            try:
-                import boto3
-                s3 = boto3.client('s3')
-                s3_key = f"{self.full_config.get('project_name', 'crop_yield')}/{self.RESUME_CKPT_NAME}"
-                s3.upload_file(final_path, s3_bucket, s3_key)
-                logger.debug(f"Resume checkpoint synced to s3://{s3_bucket}/{s3_key}")
-            except Exception as e:
-                logger.warning(f"Failed to sync checkpoint to S3: {e}")
+            # Join previous upload thread if it is still running to ensure sequential consistency
+            if self._active_upload_thread is not None and self._active_upload_thread.is_alive():
+                logger.debug("Waiting for previous checkpoint S3 upload to complete...")
+                self._active_upload_thread.join(timeout=30)
+
+            def upload_worker(file_path, bucket, key):
+                try:
+                    import boto3
+                    s3 = boto3.client('s3')
+                    s3.upload_file(file_path, bucket, key)
+                    logger.debug(f"Resume checkpoint synced to s3://{bucket}/{key}")
+                except Exception as e:
+                    logger.warning(f"Failed to sync checkpoint to S3: {e}")
+
+            s3_key = f"{self.full_config.get('project_name', 'crop_yield')}/{self.RESUME_CKPT_NAME}"
+            self._active_upload_thread = threading.Thread(
+                target=upload_worker,
+                args=(final_path, s3_bucket, s3_key),
+                daemon=False  # Wait for upload completion on process exit
+            )
+            self._active_upload_thread.start()
 
     def _load_resume_checkpoint(self, save_path: str) -> Optional[int]:
         """If a resume checkpoint exists, restore all state and return start epoch."""
@@ -243,6 +255,7 @@ class TrainManager:
         for epoch in range(start_epoch, num_epochs):
             self._current_epoch = epoch  # expose to SIGTERM handler
 
+            self._sync_termination_flag()
             # If Spot termination was requested, stop training gracefully
             if self._termination_requested.is_set():
                 logger.warning(
@@ -251,7 +264,21 @@ class TrainManager:
                 break
 
             train_loss = self.train_epoch(train_loader)
+            self._sync_termination_flag()
+            if self._termination_requested.is_set():
+                logger.warning(
+                    f"Spot termination requested after training epoch — breaking before validation."
+                )
+                break
+
             val_loss   = self.validate(val_loader)
+            self._sync_termination_flag()
+            if self._termination_requested.is_set():
+                logger.warning(
+                    f"Spot termination requested after validation epoch — breaking before saving checkpoint."
+                )
+                break
+
             self.scheduler.step(val_loss)
 
             logger.info(
@@ -277,15 +304,31 @@ class TrainManager:
             # Always write resumable checkpoint so a runner death wastes ≤ 1 epoch
             self._save_resume_checkpoint(save_path, epoch, best_val_loss)
 
-        # Clean up resume checkpoint on successful completion so next run starts fresh
-        resume_path = self._resume_checkpoint_path(save_path)
-        if os.path.exists(resume_path):
-            os.remove(resume_path)
-            logger.info("Training complete — resume checkpoint removed.")
+        # Clean up resume checkpoint only on successful completion so next run starts fresh
+        if not self._termination_requested.is_set():
+            resume_path = self._resume_checkpoint_path(save_path)
+            if os.path.exists(resume_path):
+                os.remove(resume_path)
+                logger.info("Training complete — resume checkpoint removed.")
+        else:
+            logger.warning("Training interrupted by Spot termination. Resumable checkpoint preserved.")
+
+        # Join any active upload thread to ensure final synchronization completes before exit
+        if self._active_upload_thread is not None and self._active_upload_thread.is_alive():
+            logger.info("Waiting for active S3 checkpoint upload thread to complete...")
+            self._active_upload_thread.join()
 
         logger.success("Training run complete.")
         return {
             "best_val_loss": best_val_loss,
             "epochs": num_epochs,
         }
+
+    def _sync_termination_flag(self) -> None:
+        """Synchronize the spot termination request flag across all DDP ranks."""
+        if torch.distributed.is_initialized():
+            term_tensor = torch.tensor([1.0 if self._termination_requested.is_set() else 0.0], device=self.device)
+            torch.distributed.all_reduce(term_tensor)
+            if term_tensor.item() > 0.0:
+                self._termination_requested.set()
 

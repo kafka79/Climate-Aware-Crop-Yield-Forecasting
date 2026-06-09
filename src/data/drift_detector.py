@@ -76,11 +76,21 @@ def _ks_pvalue(reference: np.ndarray, current: np.ndarray) -> float:
 
 # ── Feature extraction from Zarr ─────────────────────────────────────────────
 
-def _extract_ndvi(zarr_path: Path) -> Optional[np.ndarray]:
+def _extract_ndvi(zarr_path: Path, years: Optional[List[int]] = None) -> Optional[np.ndarray]:
     """Extract NDVI time series from a Zarr satellite feature store."""
     try:
         import xarray as xr
         ds = xr.open_zarr(zarr_path)
+        
+        # Filter by years if specified and 'time' coordinate exists
+        if years is not None and "time" in ds.coords:
+            times = pd.to_datetime(ds.time.values)
+            indices = np.flatnonzero(np.isin(times.year, years))
+            if len(indices) == 0:
+                logger.warning(f"No timestamps found for years {years} in {zarr_path}")
+                return None
+            ds = ds.isel(time=indices)
+
         if "B08" in ds and "B04" in ds:
             nir_da = ds["B08"]
             red_da = ds["B04"]
@@ -111,11 +121,21 @@ def _extract_ndvi(zarr_path: Path) -> Optional[np.ndarray]:
     return None
 
 
-def _extract_weather_feature(zarr_path: Path, variable: str = "t2m") -> Optional[np.ndarray]:
+def _extract_weather_feature(zarr_path: Path, variable: str = "t2m", years: Optional[List[int]] = None) -> Optional[np.ndarray]:
     """Extract a scalar weather variable from a Zarr weather feature store."""
     try:
         import xarray as xr
         ds = xr.open_zarr(zarr_path)
+        
+        # Filter by years if specified and 'time' coordinate exists
+        if years is not None and "time" in ds.coords:
+            times = pd.to_datetime(ds.time.values)
+            indices = np.flatnonzero(np.isin(times.year, years))
+            if len(indices) == 0:
+                logger.warning(f"No timestamps found for years {years} in {zarr_path}")
+                return None
+            ds = ds.isel(time=indices)
+
         if variable in ds:
             da = ds[variable]
             
@@ -151,6 +171,8 @@ def check_region_drift(
     region: str,
     reference_zarr: Path,
     current_zarr: Path,
+    reference_year: int,
+    current_year: int,
     reference_weather: Optional[Path] = None,
     current_weather: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -162,9 +184,10 @@ def check_region_drift(
     """
     report: Dict[str, Any] = {"region": region}
 
-    # ── NDVI PSI ──
-    ref_ndvi = _extract_ndvi(reference_zarr)
-    cur_ndvi = _extract_ndvi(current_zarr)
+    # ── NDVI PSI (Using 5-year rolling climatological baseline to avoid single-year cycle bias) ──
+    ref_years = [reference_year - i for i in range(5)]
+    ref_ndvi = _extract_ndvi(reference_zarr, ref_years)
+    cur_ndvi = _extract_ndvi(current_zarr, [current_year])
 
     if ref_ndvi is not None and cur_ndvi is not None and len(ref_ndvi) > 5 and len(cur_ndvi) > 5:
         psi = _psi(ref_ndvi, cur_ndvi)
@@ -184,8 +207,8 @@ def check_region_drift(
     ks_pval = None
     ks_status = "SKIP"
     if reference_weather and current_weather:
-        ref_w = _extract_weather_feature(reference_weather)
-        cur_w = _extract_weather_feature(current_weather)
+        ref_w = _extract_weather_feature(reference_weather, "t2m", ref_years)
+        cur_w = _extract_weather_feature(current_weather, "t2m", [current_year])
         if ref_w is not None and cur_w is not None and len(ref_w) > 5 and len(cur_w) > 5:
             try:
                 ks_pval = _ks_pvalue(ref_w, cur_w)
@@ -264,6 +287,8 @@ def run_drift_check(
             region=region_key,
             reference_zarr=ref_path,
             current_zarr=cur_path,
+            reference_year=reference_year,
+            current_year=current_year,
             reference_weather=weather_ref if weather_ref.exists() else None,
             current_weather=weather_cur if weather_cur.exists() else None,
         )
@@ -274,6 +299,17 @@ def run_drift_check(
 
 def send_drift_alert(reports: List[Dict[str, Any]]) -> None:
     """Send alert to Slack/Discord webhook if configured in environment."""
+    # Emit structured metric telemetry for all reports (ingestible by CloudWatch / Datadog)
+    for r in reports:
+        metric_payload = {
+            "metric_name": "pipeline_feature_drift",
+            "region": r["region"],
+            "ndvi_psi": r.get("ndvi_psi"),
+            "ks_pvalue": r.get("ks_pvalue"),
+            "overall_status": r["overall_status"]
+        }
+        logger.info(f"METRIC_LOG: {json.dumps(metric_payload)}")
+
     webhook_url = os.getenv("DRIFT_WEBHOOK_URL") or os.getenv("SLACK_WEBHOOK_URL")
     if not webhook_url:
         logger.info("No DRIFT_WEBHOOK_URL or SLACK_WEBHOOK_URL configured. Skipping webhook alert.")
@@ -299,7 +335,19 @@ def send_drift_alert(reports: List[Dict[str, Any]]) -> None:
     }
 
     try:
-        response = requests.post(webhook_url, json=payload, timeout=10)
+        from requests.adapters import HTTPAdapter
+        from urllib3.util import Retry
+        
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        session.mount("https://", HTTPAdapter(max_retries=retry_strategy))
+        session.mount("http://", HTTPAdapter(max_retries=retry_strategy))
+        
+        response = session.post(webhook_url, json=payload, timeout=10)
         if response.status_code in (200, 201, 204):
             logger.success("Drift alert sent successfully via Webhook.")
         else:

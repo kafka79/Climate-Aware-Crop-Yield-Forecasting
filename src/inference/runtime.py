@@ -183,7 +183,7 @@ def _load_soil_vector(
     soil_path = Path(config["paths"]["raw"]["soil"]) / f"{region}_soil.csv"
 
     def _fallback(reason: str) -> Tuple[np.ndarray, str, List[str]]:
-        """Try regional median first, then fall back to zeros."""
+        """Try regional median first, then raise error if unavailable."""
         median_vec = _compute_regional_soil_median(config, soil_dim, exclude_region=region)
         if median_vec is not None:
             fallback_label = "FALLBACK → regional median"
@@ -191,18 +191,17 @@ def _load_soil_vector(
                 f"Soil data issue for '{region}': {reason}. "
                 "Using the median soil vector from other regions as fallback."
             )
+            warnings.warn(msg, MissingSoilDataWarning, stacklevel=3)
+            logger.warning(msg)
+            modality_warnings.append(msg)
+            return median_vec, fallback_label, modality_warnings
         else:
-            median_vec = np.zeros(soil_dim, dtype=np.float32)
-            fallback_label = "FALLBACK → zero-vector (no other regions available)"
-            msg = (
+            # Raise hard error instead of zero-vector fallback to prevent silent accuracy degradation
+            raise InferenceUnavailableError(
                 f"Soil data issue for '{region}': {reason}. "
-                "No other regional soil data available. Using zero-vector "
-                "fallback — forecast may be unreliable."
+                "No other regional soil data available for fallback. "
+                "Inference aborted to prevent out-of-distribution prediction errors."
             )
-        warnings.warn(msg, MissingSoilDataWarning, stacklevel=3)
-        logger.warning(msg)
-        modality_warnings.append(msg)
-        return median_vec, fallback_label, modality_warnings
 
     if not soil_path.exists():
         return _fallback(f"file missing at {soil_path}")

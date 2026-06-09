@@ -1,8 +1,28 @@
+import math
 import torch
 import torch.nn as nn
 from loguru import logger
 from typing import Dict, Any, Tuple
 from src.models.mdn import MixtureDensityNetwork
+
+
+class PositionalEncoding(nn.Module):
+    """
+    Standard sinusoidal positional encodings.
+    """
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super(PositionalEncoding, self).__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, D)
+        return x + self.pe[:, :x.size(1)]
 
 
 class MultiModalTransformer(nn.Module):
@@ -47,6 +67,12 @@ class MultiModalTransformer(nn.Module):
                                       hidden_dim,
                                       batch_first=True)
         self.soil_encoder = nn.Linear(soil_dim, hidden_dim)
+
+        # Temporal fusion layer to map fused satellite and weather features back to hidden_dim
+        self.temporal_fusion = nn.Linear(2 * hidden_dim, hidden_dim)
+
+        # Positional Encoding for temporal self-attention
+        self.pos_encoder = PositionalEncoding(d_model=hidden_dim, max_len=100)
 
         # Transformer Layers (applied to temporal features ONLY)
         encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim,
@@ -98,10 +124,11 @@ class MultiModalTransformer(nn.Module):
         # 2. Encode weather
         weather_enc, _ = self.weather_encoder(weather)        # (B, T, D)
 
-        # 3. Differential privacy noise — SCALED per feature dimension.
-        # Previous version applied uniform randn * epsilon, which destroyed
-        # low-magnitude features (pH ~6.5) while barely affecting high-magnitude
-        # ones (potassium ~200). Now noise is proportional to learned sensitivity.
+        # 3. Input perturbation/jittering regularization (mislabeled as "Differential Privacy"
+        # in configuration). NOTE: Adding noise to inputs during training is a standard
+        # regularization technique, but it does NOT provide formal differential privacy guarantees
+        # on model parameters (which would require gradient clipping and noise addition during
+        # optimization via DP-SGD/Opacus). Noise is proportional to coordinate sensitivity.
         if self.training and self.use_privacy:
             sensitivity = self.soil_sensitivity.abs() + 1e-8  # (F_s,)
             noise = torch.randn_like(soil) * self.epsilon * sensitivity
@@ -122,11 +149,13 @@ class MultiModalTransformer(nn.Module):
         cross_out, _ = self.cross_attn(sat_q, context_kv, context_kv)  # (T, B, D)
         cross_out = cross_out.permute(1, 0, 2)                # (B, T, D)
 
-        # 6. Concatenate TEMPORAL features only, then refine via self-attention
-        temporal_fused = torch.cat([cross_out, weather_enc], dim=1)  # (B, 2T, D)
-        temporal_fused = temporal_fused.permute(1, 0, 2)      # (2T, B, D)
+        # 6. Fuse TEMPORAL features at each timestep to preserve alignment, then refine via self-attention
+        temporal_fused = torch.cat([cross_out, weather_enc], dim=2)  # (B, T, 2D)
+        temporal_fused = self.temporal_fusion(temporal_fused)        # (B, T, D)
+        temporal_fused = self.pos_encoder(temporal_fused)            # (B, T, D) Add Positional Encoding
+        temporal_fused = temporal_fused.permute(1, 0, 2)            # (T, B, D)
         temporal_out = self.transformer_encoder(temporal_fused)
-        temporal_out = temporal_out.permute(1, 0, 2)          # (B, 2T, D)
+        temporal_out = temporal_out.permute(1, 0, 2)                # (B, T, D)
 
         # 7. Pool temporal dimension → (B, D)
         temporal_pooled = torch.mean(temporal_out, dim=1)     # (B, D)

@@ -83,28 +83,60 @@ hr { border:none; border-top:1px solid #e5e7eb; margin:1.5rem 0; }
 </div>
 
 <script>
-function updateOnlineStatus() {
+function checkServerConnection() {
   var banner = document.getElementById('offline-banner');
   var overlay = document.getElementById('offline-overlay');
-  var isOnline = navigator.onLine;
   
-  if (banner) banner.style.display = isOnline ? 'none' : 'block';
-  if (overlay) overlay.style.display = isOnline ? 'none' : 'block';
+  // Check client-side navigator.onLine first
+  if (!navigator.onLine) {
+    showOffline(banner, overlay);
+    return;
+  }
   
-  // Disable all input and select components in the DOM to prevent dynamic state runs
-  var inputs = document.querySelectorAll('select, button, input, textarea');
-  inputs.forEach(function(el) {
-    if (!isOnline) {
-      el.setAttribute('disabled', 'true');
-    } else {
-      el.removeAttribute('disabled');
-    }
-  });
+  // Make a light HEAD request to verify the server is responsive
+  fetch(window.location.href, { method: 'HEAD', cache: 'no-store' })
+    .then(function(response) {
+      if (response.ok) {
+        if (banner) banner.style.display = 'none';
+        if (overlay) overlay.style.display = 'none';
+        toggleInputs(false);
+      } else {
+        showOffline(banner, overlay);
+      }
+    })
+    .catch(function() {
+      showOffline(banner, overlay);
+    });
 }
-window.addEventListener('online',  updateOnlineStatus);
-window.addEventListener('offline', updateOnlineStatus);
-// Run on startup to handle already-offline cases
-setTimeout(updateOnlineStatus, 500);
+
+function showOffline(banner, overlay) {
+  if (banner) banner.style.display = 'block';
+  if (overlay) overlay.style.display = 'block';
+  toggleInputs(true);
+}
+
+function toggleInputs(disabled) {
+  // Use HTML5 standard inert attribute on the main app container to robustly block all interactions
+  // (clicks, pointer events, keyboard focus, assistive tech) without mutating individual widgets
+  // that Streamlit continuously redraws.
+  var container = document.querySelector('[data-testid="stAppViewContainer"]');
+  if (container) {
+    if (disabled) {
+      container.setAttribute('inert', '');
+    } else {
+      container.removeAttribute('inert');
+    }
+  }
+}
+
+// Check on online/offline events for instantaneous response
+window.addEventListener('online', checkServerConnection);
+window.addEventListener('offline', checkServerConnection);
+
+// Check periodically for server responsiveness (every 15 seconds to save battery/data)
+setInterval(checkServerConnection, 15000);
+// Run on startup
+setTimeout(checkServerConnection, 500);
 </script>
 """, unsafe_allow_html=True)
 
@@ -147,6 +179,9 @@ st.caption(f"Yield forecast workspace · {year}")
 # ── Metrics (THE focal point) ────────────────────────────────────────────────
 if prediction:
     st.success("Live forecast from checkpoint + processed feature store.")
+    if prediction.get("modality_warnings"):
+        for warn_msg in prediction["modality_warnings"]:
+            st.warning(f"⚠️ {warn_msg}")
     mc = st.columns(4)
     mc[0].metric("Predicted Yield", f"{prediction['predicted_yield']:.2f} t/ha")
     mc[1].metric("95% Confidence", f"{prediction['lower_bound']:.2f} – {prediction['upper_bound']:.2f}")
@@ -198,7 +233,7 @@ with left:
         fig.update_traces(line=dict(color="#16a34a", width=2.5), marker=dict(color="#16a34a", size=8))
         if prediction:
             fig.add_trace(go.Scatter(x=[prediction["year"]], y=[prediction["predicted_yield"]], mode="markers", marker=dict(size=14, color="#d97706", symbol="diamond"), name="Forecast"))
-        fig.update_layout(height=300, margin=dict(l=0,r=0,t=10,b=0), xaxis_title="Year", yaxis_title="Yield (t/ha)", font=dict(family="Inter"))
+        fig.update_layout(height=300, margin=dict(l=0,r=0,t=10,b=0), xaxis_title="Year", yaxis_title="Yield (t/ha)", font=dict(family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"))
         st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Vegetation Index (NDVI)")
@@ -207,7 +242,7 @@ with left:
         fn = px.area(ndf, x="step", y="ndvi", template="plotly_white")
         fn.update_traces(line=dict(color="#16a34a", width=2), fillcolor="rgba(22,163,74,0.08)")
         fn.add_hline(y=0.3, line_dash="dot", line_color="#d97706", annotation_text="Stress threshold")
-        fn.update_layout(height=250, margin=dict(l=0,r=0,t=10,b=0), xaxis_title="Time Step", yaxis_title="NDVI", font=dict(family="Inter"))
+        fn.update_layout(height=250, margin=dict(l=0,r=0,t=10,b=0), xaxis_title="Time Step", yaxis_title="NDVI", font=dict(family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"))
         st.plotly_chart(fn, use_container_width=True)
     else:
         st.info("No NDVI series available for this region/year.")
@@ -217,7 +252,7 @@ with right:
         st.subheader("What Drove This Forecast")
         adf = pd.DataFrame({"Modality": list(prediction["attribution"].keys()), "Score": list(prediction["attribution"].values())}).sort_values("Score")
         fa = px.bar(adf, x="Score", y="Modality", orientation="h", template="plotly_white", color="Score", color_continuous_scale=["#d1fae5","#16a34a","#14532d"])
-        fa.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False, font=dict(family="Inter"))
+        fa.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False, font=dict(family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"))
         st.plotly_chart(fa, use_container_width=True)
 
         st.subheader("Recommendations")
@@ -235,6 +270,7 @@ if YIELD_HISTORY.empty:
     st.info("No historical yield records available for the map.")
 else:
     ms = YIELD_HISTORY.groupby("site_id", as_index=False)["yield"].mean().rename(columns={"yield": "map_yield"})
+    hist_averages = YIELD_HISTORY.groupby("site_id")["yield"].mean().to_dict()
     if prediction:
         ms.loc[ms["site_id"] == region, "map_yield"] = prediction["predicted_yield"]
     rl = {a["name"]: a for a in CONFIG.get("study_areas", [])}
@@ -247,13 +283,32 @@ else:
         mdf = pd.DataFrame(rows)
         ctr = mdf.loc[mdf["site_id"] == region].iloc[0]
         fm = folium.Map(location=[ctr["lat"], ctr["lon"]], zoom_start=5, tiles="CartoDB positron")
-        lo, hi = mdf["yv"].min(), mdf["yv"].max()
-        sc = max(hi - lo, 0.1)
         for _, r in mdf.iterrows():
-            ratio = (r["yv"] - lo) / sc
-            g, rd = int(100 + 120*ratio), int(180*(1-ratio))
             sel = r["site_id"] == region
-            folium.CircleMarker(location=[r["lat"], r["lon"]], radius=18 if sel else 13, color="#1f2937" if sel else "#9ca3af", weight=3 if sel else 1, fill=True, fill_color=f"#{rd:02x}{g:02x}3a", fill_opacity=0.9, tooltip=f"{r['site_id']}: {r['yv']:.2f} t/ha").add_to(fm)
+            
+            # Map marker color according to deviation from historical average (design tokens: green, amber, red)
+            hist_avg = hist_averages.get(r["site_id"])
+            if hist_avg:
+                deviation = (hist_avg - r["yv"]) / hist_avg
+                if deviation > 0.5:
+                    fill_color = "#ef4444"  # Red token (High Risk)
+                elif deviation > 0.2:
+                    fill_color = "#f59e0b"  # Amber token (Medium Risk)
+                else:
+                    fill_color = "#22c55e"  # Green token (Low Risk)
+            else:
+                fill_color = "#22c55e"
+                
+            folium.CircleMarker(
+                location=[r["lat"], r["lon"]],
+                radius=18 if sel else 13,
+                color="#1f2937" if sel else "#9ca3af",
+                weight=3 if sel else 1,
+                fill=True,
+                fill_color=fill_color,
+                fill_opacity=0.9,
+                tooltip=f"{r['site_id']}: {r['yv']:.2f} t/ha"
+            ).add_to(fm)
         st_folium(fm, use_container_width=True, height=400)
     else:
         st.info("Could not populate the map from current configuration.")
