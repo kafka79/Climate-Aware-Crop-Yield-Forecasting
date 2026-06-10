@@ -21,8 +21,14 @@ const RESULT_CACHE  = `crop-forecast-results-${CACHE_VERSION}`;
 // Assets to pre-cache on install (app shell)
 const PRECACHE_URLS = [
   "/",
+  "/app/static/index.html",
   "/app/static/manifest.json",
+  "/app/static/model.onnx",
+  "/app/static/icons/icon-192.png",
+  "/app/static/icons/icon-512.png",
   "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
+  "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js",
+  "https://cdn.jsdelivr.net/npm/chart.js",
 ];
 
 // ── Install: pre-cache the app shell ─────────────────────────────────────────
@@ -70,7 +76,8 @@ self.addEventListener("fetch", (event) => {
   if (
     url.pathname.startsWith("/app/static/") ||
     url.hostname === "fonts.googleapis.com" ||
-    url.hostname === "fonts.gstatic.com"
+    url.hostname === "fonts.gstatic.com" ||
+    url.hostname === "cdn.jsdelivr.net"
   ) {
     event.respondWith(
       caches.match(request).then((cached) => {

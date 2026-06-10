@@ -1,11 +1,17 @@
-import sys, os
-os.environ["PYTHONIOENCODING"] = "utf-8"
+import sys
+import os
+import io
+
+# Force standard streams to use UTF-8 encoding to avoid Windows console errors on emojis like ✅
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 import torch
 import torch.nn as nn
 from loguru import logger
-from src.models.transformer import initialize_model
+from src.models.transformer import initialize_model, load_model_weights
 from src.utils.config import load_config
 
 def export_to_onnx(
@@ -25,7 +31,7 @@ def export_to_onnx(
 
     if os.path.exists(model_path):
         logger.info(f"Loading trained weights from {model_path}...")
-        model.load_state_dict(torch.load(model_path, map_location="cpu"))
+        load_model_weights(model, model_path, torch.device("cpu"))
     else:
         logger.warning(f"No trained weights found at {model_path}. Exporting untrained model.")
 
@@ -61,6 +67,17 @@ def export_to_onnx(
         },
     )
     logger.success(f"ONNX model exported successfully → {output_path}")
+    
+    # Also write a copy to the static assets directory for offline PWA client-side inference
+    static_output = "static/model.onnx"
+    try:
+        import shutil
+        os.makedirs(os.path.dirname(static_output), exist_ok=True)
+        shutil.copy2(output_path, static_output)
+        logger.success(f"ONNX model copied to static assets → {static_output}")
+    except Exception as e:
+        logger.warning(f"Failed to copy ONNX model to static assets: {e}")
+        
     return output_path
 
 

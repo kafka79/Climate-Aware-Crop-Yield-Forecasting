@@ -1,6 +1,6 @@
 import torch
 from loguru import logger
-from typing import Dict
+from typing import Dict, Optional, List
 from captum.attr import IntegratedGradients
 from src.models.mdn import mdn_expected_value
 
@@ -22,7 +22,8 @@ class YieldExplainer:
         return output
         
     def calculate_attributions(self, sat: torch.Tensor, weather: torch.Tensor, 
-                               soil: torch.Tensor, target_idx: int = 0, steps: int = 50):
+                               soil: torch.Tensor, target_idx: int = 0, steps: int = 50,
+                               baselines: Optional[Dict[str, torch.Tensor]] = None):
         """
         Calculate Integrated Gradients attribution for each modality.
         
@@ -32,17 +33,39 @@ class YieldExplainer:
             soil: (B, F_s) - Static Features
             target_idx: Index of the output to explain (0 for regression)
             steps: Approximation steps for the integral
+            baselines: Optional dictionary containing baseline tensors for each modality.
             
         Returns:
             Dict[str, torch.Tensor]: Attributions per modality.
         """
         logger.info(f"Calculating multi-modal attributions (Steps={steps})...")
+        baselines = baselines or {}
         
-        # Baselines (usually zeros)
-        sat_base = torch.zeros_like(sat)
-        weather_base = torch.zeros_like(weather)
-        soil_base = torch.zeros_like(soil)
-        
+        # 1. Satellite Baseline: Temporal average spectral signature
+        if "sat" in baselines:
+            sat_base = baselines["sat"]
+        else:
+            sat_base = sat.mean(dim=1, keepdim=True).expand_as(sat)
+            
+        # 2. Weather Baseline: Temporal average weather variables
+        if "weather" in baselines:
+            weather_base = baselines["weather"]
+        else:
+            weather_base = weather.mean(dim=1, keepdim=True).expand_as(weather)
+            
+        # 3. Soil Baseline: Realistic default (pH ~6.5, SOC ~10.0, N ~1.5) or passed baseline
+        if "soil" in baselines:
+            soil_base = baselines["soil"]
+        else:
+            # Use realistic global averages (pH ~6.5, SOC ~10.0, Nitrogen ~1.5) instead of absolute zero.
+            default_soil = torch.tensor([6.5, 10.0, 1.5], dtype=soil.dtype, device=soil.device)
+            # Slice/pad to match soil dimensions
+            if soil.shape[-1] <= 3:
+                default_soil = default_soil[:soil.shape[-1]]
+            else:
+                default_soil = torch.cat([default_soil, torch.zeros(soil.shape[-1] - 3, dtype=soil.dtype, device=soil.device)])
+            soil_base = default_soil.unsqueeze(0).expand_as(soil)
+            
         # Calculate attributions
         attributions = self.ig.attribute(
             inputs=(sat, weather, soil),
@@ -58,7 +81,7 @@ class YieldExplainer:
         }
         
         return attr_dict
-
+ 
     def summarize_importance(self, attr_dict: Dict[str, torch.Tensor]):
         """
         Aggregates attributions across time and channels to get global importance scores.
@@ -74,8 +97,8 @@ class YieldExplainer:
         }
         
         return importance
-
-def explain_prediction(model: torch.nn.Module, sample: dict):
+ 
+def explain_prediction(model: torch.nn.Module, sample: dict, baselines: Optional[dict] = None):
     """
     Standard entry point for explaining a single prediction.
     """
@@ -86,7 +109,7 @@ def explain_prediction(model: torch.nn.Module, sample: dict):
     weather = sample["weather"].unsqueeze(0) if sample["weather"].dim() == 2 else sample["weather"]
     soil = sample["soil"].unsqueeze(0) if sample["soil"].dim() == 1 else sample["soil"]
     
-    attr_dict = explainer.calculate_attributions(sat, weather, soil)
+    attr_dict = explainer.calculate_attributions(sat, weather, soil, baselines=baselines)
     summary = explainer.summarize_importance(attr_dict)
     
     logger.success("XAI Attribution Report generated successfully.")

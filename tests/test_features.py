@@ -1,20 +1,30 @@
 import pytest
 import numpy as np
 import pandas as pd
-from src.features.ndvi import calculate_ndvi, calculate_evi
+import xarray as xr
+from src.features.satellite_features import SatelliteFeatureExtractor
 from src.features.weather_features import calculate_gdd
 
-def test_calculate_ndvi():
-    red = np.array([0.1, 0.4])
-    nir = np.array([0.5, 0.2])
+def test_calculate_ndvi_and_evi():
+    # Setup satellite dataset
+    ds = xr.Dataset({
+        "B04": (["time"], np.array([0.1, 0.4])),
+        "B08": (["time"], np.array([0.5, 0.2])),
+        "B02": (["time"], np.array([0.05, 0.1])),
+    })
     
-    ndvi = calculate_ndvi(red, nir)
+    extractor = SatelliteFeatureExtractor({})
+    ndvi = extractor.calculate_ndvi(ds)
+    evi = extractor.calculate_evi(ds)
     
     # (0.5 - 0.1) / (0.5 + 0.1) = 0.4 / 0.6 = 0.6667
-    assert np.isclose(ndvi[0], 0.666666, atol=1e-5)
+    assert np.isclose(ndvi.values[0], 0.666666, atol=1e-5)
     
     # (0.2 - 0.4) / (0.2 + 0.4) = -0.2 / 0.6 = -0.3333
-    assert np.isclose(ndvi[1], -0.333333, atol=1e-5)
+    assert np.isclose(ndvi.values[1], -0.333333, atol=1e-5)
+    
+    # EVI 0: 2.5 * ((0.5 - 0.1) / (0.5 + 6 * 0.1 - 7.5 * 0.05 + 1)) = 2.5 * (0.4 / 1.725) = 0.57971
+    assert np.isclose(evi.values[0], 0.57971, atol=1e-4)
 
 def test_calculate_gdd():
     t_max = np.array([30.0, 40.0, 15.0])

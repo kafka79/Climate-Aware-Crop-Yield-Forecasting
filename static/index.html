@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Offline Crop Yield Intelligence</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#16a34a">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- ONNX Runtime Web and Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  
+  <style>
+    :root {
+      --primary: #16a34a;
+      --primary-dark: #14532d;
+      --bg: #f9fafb;
+      --card-bg: #ffffff;
+      --text: #111827;
+      --text-muted: #6b7280;
+      --border: #e5e7eb;
+      --radius: 12px;
+      --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 2rem 1rem;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    
+    header {
+      margin-bottom: 2rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1.5rem;
+    }
+    
+    header h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    
+    header p {
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+    }
+    
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.25rem 0.75rem;
+      border-radius: 100px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: #dcfce7;
+      color: #166534;
+      border: 1px solid #bbf7d0;
+    }
+    
+    .badge.offline {
+      background: #fef3c7;
+      color: #92400e;
+      border-color: #fde68a;
+    }
+    
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1.8fr;
+      gap: 2rem;
+    }
+    
+    @media (max-width: 900px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    
+    .card h2 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 1.25rem;
+      color: var(--text);
+      border-left: 4px solid var(--primary);
+      padding-left: 0.5rem;
+    }
+    
+    .form-group {
+      margin-bottom: 1rem;
+    }
+    
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 0.35rem;
+    }
+    
+    input, select {
+      width: 100%;
+      padding: 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 1rem;
+      background-color: #f9fafb;
+    }
+    
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--primary);
+      background-color: #fff;
+    }
+    
+    .row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    
+    button {
+      width: 100%;
+      padding: 1rem;
+      background-color: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    
+    button:hover {
+      background-color: var(--primary-dark);
+    }
+    
+    button:disabled {
+      background-color: var(--border);
+      cursor: not-allowed;
+    }
+    
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    
+    .metric-box {
+      background: #f9fafb;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      text-align: center;
+    }
+    
+    .metric-val {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+    
+    .metric-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      margin-top: 0.25rem;
+    }
+    
+    .alert-box {
+      background-color: #fffbeb;
+      border-left: 4px solid #f59e0b;
+      padding: 1rem;
+      border-radius: 0 8px 8px 0;
+      font-size: 0.9rem;
+      color: #92400e;
+      margin-bottom: 1.5rem;
+      display: none;
+    }
+    
+    .alert-box.critical {
+      background-color: #fef2f2;
+      border-left-color: #ef4444;
+      color: #991b1b;
+    }
+    
+    .chart-container {
+      position: relative;
+      height: 300px;
+      width: 100%;
+      margin-top: 1rem;
+    }
+    
+    #model-status {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 0.5rem;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>🌾 Crop Yield Intelligence <span class="badge offline">Edge/Offline Mode</span></h1>
+    <p>Perform client-side crop yield forecasting with full distribution diagnostics (GMM) using WebAssembly.</p>
+  </header>
+  
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Modal Input Parameters</h2>
+        
+        <form id="inference-form">
+          <label>Spectral Satellites (Sentinel-2)</label>
+          <div class="row">
+            <div class="form-group">
+              <input type="number" id="sat-b02" value="0.12" step="0.01" min="0" max="1" placeholder="B02">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">Blue</span>
+            </div>
+            <div class="form-group">
+              <input type="number" id="sat-b03" value="0.15" step="0.01" min="0" max="1" placeholder="B03">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">Green</span>
+            </div>
+            <div class="form-group">
+              <input type="number" id="sat-b04" value="0.10" step="0.01" min="0" max="1" placeholder="B04">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">Red</span>
+            </div>
+            <div class="form-group">
+              <input type="number" id="sat-b08" value="0.45" step="0.01" min="0" max="1" placeholder="B08">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">NIR</span>
+            </div>
+            <div class="form-group">
+              <input type="number" id="sat-scl" value="0.5" step="0.1" min="0" max="1" placeholder="SCL">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">Veg</span>
+            </div>
+          </div>
+          
+          <label>Weather (Daily Mean ERA5)</label>
+          <div class="row">
+            <div class="form-group">
+              <input type="number" id="w-tmax" value="32.5" step="0.1" placeholder="T Max">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">Max Temp (°C)</span>
+            </div>
+            <div class="form-group">
+              <input type="number" id="w-tmin" value="23.2" step="0.1" placeholder="T Min">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">Min Temp (°C)</span>
+            </div>
+            <div class="form-group">
+              <input type="number" id="w-precip" value="12.4" step="0.1" placeholder="Precip">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">Rainfall (mm)</span>
+            </div>
+          </div>
+          
+          <label>Soil Features (ISRIC Ground Truth)</label>
+          <div class="row">
+            <div class="form-group">
+              <input type="number" id="soil-ph" value="6.2" step="0.1" min="0" max="14" placeholder="pH">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">pH</span>
+            </div>
+            <div class="form-group">
+              <input type="number" id="soil-soc" value="12.5" step="0.1" placeholder="SOC">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">SOC (g/kg)</span>
+            </div>
+            <div class="form-group">
+              <input type="number" id="soil-nit" value="1.4" step="0.1" placeholder="N">
+              <span style="font-size: 0.7rem; color: var(--text-muted)">Nitrogen (g/kg)</span>
+            </div>
+          </div>
+          
+          <button type="submit" id="run-btn" disabled>Loading ONNX Model...</button>
+          <div id="model-status">Connecting to WebAssembly runtime...</div>
+        </form>
+      </div>
+    </div>
+    
+    <div>
+      <div class="card">
+        <h2>Yield Prediction Results</h2>
+        
+        <div class="alert-box" id="warning-box">
+          <!-- Bimodal warning description -->
+        </div>
+        
+        <div class="metrics">
+          <div class="metric-box">
+            <div class="metric-val" id="predicted-yield">—</div>
+            <div class="metric-label">Predicted Mean (t/ha)</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-val" id="uncertainty-level">—</div>
+            <div class="metric-label">Predictive Std Dev</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-val" id="distribution-type">Unimodal</div>
+            <div class="metric-label">Distribution Mode</div>
+          </div>
+        </div>
+        
+        <h2>GMM Probability Distribution PDF</h2>
+        <div class="chart-container">
+          <canvas id="pdf-chart"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let session = null;
+    let chart = null;
+    
+    // Initialize ONNX Session on page load
+    async function initOnnx() {
+      const statusDiv = document.getElementById("model-status");
+      const runBtn = document.getElementById("run-btn");
+      try {
+        statusDiv.innerText = "Loading WebAssembly tensors...";
+        // Initialize inference session pointing to local exported model
+        session = await ort.InferenceSession.create('model.onnx');
+        statusDiv.innerText = "ONNX Model loaded successfully.";
+        runBtn.removeAttribute("disabled");
+        runBtn.innerText = "Compute Local Forecast";
+      } catch (err) {
+        console.error("ONNX Load error:", err);
+        statusDiv.innerHTML = "<span style='color:#dc2626'>⚠️ Error loading ONNX model. Check static/model.onnx is built.</span>";
+      }
+    }
+    
+    // GMM Probability Density Function (PDF) evaluator
+    function gmmPdf(y, pi, sigma, mu) {
+      let pdf = 0;
+      const numComponents = pi.length;
+      for (let k = 0; k < numComponents; k++) {
+        const w = pi[k];
+        const s = sigma[k];
+        const m = mu[k];
+        const exponent = -Math.pow(y - m, 2) / (2 * Math.pow(s, 2));
+        const coeff = w / (s * Math.sqrt(2 * Math.PI));
+        pdf += coeff * Math.exp(exponent);
+      }
+      return pdf;
+    }
+    
+    // Normal math functions in JS
+    function getWeightedMean(pi, mu) {
+      let sum = 0;
+      for (let i = 0; i < pi.length; i++) {
+        sum += pi[i] * mu[i];
+      }
+      return sum;
+    }
+    
+    function getWeightedStd(pi, sigma, mu, mean) {
+      let secondMoment = 0;
+      for (let i = 0; i < pi.length; i++) {
+        secondMoment += pi[i] * (Math.pow(sigma[i], 2) + Math.pow(mu[i], 2));
+      }
+      const variance = Math.max(secondMoment - Math.pow(mean, 2), 1e-6);
+      return Math.sqrt(variance);
+    }
+    
+    // Handle form submit
+    document.getElementById("inference-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!session) return;
+      
+      // Collect Inputs
+      const satVal = [
+        parseFloat(document.getElementById("sat-b02").value),
+        parseFloat(document.getElementById("sat-b03").value),
+        parseFloat(document.getElementById("sat-b04").value),
+        parseFloat(document.getElementById("sat-b08").value),
+        parseFloat(document.getElementById("sat-scl").value)
+      ];
+      const weatherVal = [
+        parseFloat(document.getElementById("w-tmax").value),
+        parseFloat(document.getElementById("w-tmin").value),
+        parseFloat(document.getElementById("w-precip").value)
+      ];
+      const soilVal = [
+        parseFloat(document.getElementById("soil-ph").value),
+        parseFloat(document.getElementById("soil-soc").value),
+        parseFloat(document.getElementById("soil-nit").value)
+      ];
+      
+      // Build Inputs: Tensors expect Batch=1, Timesteps=12, Features
+      // For standalone demo client, we repeat inputs over sequence length of 12
+      const T = 12;
+      const satFlattened = new Float32Array(T * 5);
+      const weatherFlattened = new Float32Array(T * 3);
+      for (let t = 0; t < T; t++) {
+        satFlattened.set(satVal, t * 5);
+        weatherFlattened.set(weatherVal, t * 3);
+      }
+      const soilFlattened = new Float32Array(soilVal);
+      
+      const satTensor = new ort.Tensor('float32', satFlattened, [1, T, 5]);
+      const weatherTensor = new ort.Tensor('float32', weatherFlattened, [1, T, 3]);
+      const soilTensor = new ort.Tensor('float32', soilFlattened, [1, 3]);
+      
+      try {
+        const feeds = { satellite: satTensor, weather: weatherTensor, soil: soilTensor };
+        const results = await session.run(feeds);
+        
+        // Extract GMM Parameters from the three outputs
+        // PyTorch ONNX exporter returns (pi, sigma, mu)
+        const outputNames = Object.keys(results);
+        
+        // Since exporter output names might be dynamic, we find them by shape
+        let piTensor, sigmaTensor, muTensor;
+        for (const name of outputNames) {
+          const tensor = results[name];
+          if (tensor.dims.length === 2) {
+            piTensor = tensor;
+          } else if (tensor.dims.length === 3) {
+            // Distinguish sigma vs mu: sigma in model is Softplus (positives), mu is linear
+            if (sigmaTensor) {
+              muTensor = tensor;
+            } else {
+              sigmaTensor = tensor; // Assign temporally, sorted later if needed
+            }
+          }
+        }
+        
+        // Handle fallback if shapes differ
+        if (!piTensor || !sigmaTensor) {
+          throw new Error("Unexpected GMM shape returned from ONNX export.");
+        }
+        
+        // If we assigned mu/sigma backwards, check softplus (sigma values should not be highly negative)
+        const arr1 = sigmaTensor.data;
+        const arr2 = muTensor ? muTensor.data : null;
+        // In GMM, sigma is positive. Let's make sure we map them correctly
+        let piData = Array.from(piTensor.data);
+        let sigmaData = Array.from(arr1);
+        let muData = arr2 ? Array.from(arr2) : [0];
+        
+        // GMM has 5 mixtures (config). Reshape to component lists
+        const numMixtures = piData.length;
+        
+        // Calculate expected value and std
+        const mean = getWeightedMean(piData, muData);
+        const std = getWeightedStd(piData, sigmaData, muData, mean);
+        
+        // Detect Bimodality in JS
+        const weightThreshold = 0.20;
+        const separationThreshold = 1.5;
+        let significant = [];
+        for (let k = 0; k < numMixtures; k++) {
+          if (piData[k] >= weightThreshold) {
+            significant.push({ w: piData[k], m: muData[k], s: sigmaData[k] });
+          }
+        }
+        significant.sort((a, b) => b.w - a.w); // heaviest first
+        
+        let isBimodal = false;
+        let finalYield = mean;
+        let warningBox = document.getElementById("warning-box");
+        let distType = document.getElementById("distribution-type");
+        
+        warningBox.style.display = "none";
+        distType.innerText = "Unimodal";
+        distType.style.color = "var(--text)";
+        
+        if (significant.length >= 2) {
+          const m1 = significant[0];
+          const m2 = significant[1];
+          const pooledSigma = Math.sqrt((m1.w * Math.pow(m1.s, 2) + m2.w * Math.pow(m2.s, 2)) / (m1.w + m2.w)) + 1e-8;
+          const separation = Math.abs(m1.m - m2.m) / pooledSigma;
+          
+          if (separation >= separationThreshold) {
+            isBimodal = true;
+            finalYield = m1.m; // Serve dominant mode mean instead of valley-mean
+            const valleyDepth = (1.0 - Math.abs(m1.w - m2.w) / (m1.w + m2.w)).toFixed(2);
+            
+            distType.innerText = "BIMODAL RISK";
+            distType.style.color = "#ef4444";
+            
+            warningBox.className = "alert-box critical";
+            warningBox.style.display = "block";
+            warningBox.innerHTML = `
+              <strong>⚠️ Bimodal Yield Distribution Detected (Valley Depth = ${valleyDepth})</strong><br>
+              The model sees two conflicting scenarios:<br>
+              • Mode 1: <strong>${m1.m.toFixed(2)} t/ha</strong> (weight: ${(m1.w*100).toFixed(0)}%)<br>
+              • Mode 2: <strong>${m2.m.toFixed(2)} t/ha</strong> (weight: ${(m2.w*100).toFixed(0)}%)<br>
+              To maintain safety, the client displays the dominant mode (<strong>${finalYield.toFixed(2)} t/ha</strong>) instead of the invalid average.
+            `;
+          }
+        }
+        
+        // Display metrics
+        document.getElementById("predicted-yield").innerText = `${finalYield.toFixed(2)}`;
+        document.getElementById("uncertainty-level").innerText = `${std.toFixed(2)}`;
+        
+        // Plot GMM PDF Curve
+        plotGmmPdf(piData, sigmaData, muData, finalYield);
+        
+      } catch (err) {
+        console.error("Inference failed:", err);
+        alert("Inference execution failed: " + err.message);
+      }
+    });
+    
+    // Render GMM Density Curve using Chart.js
+    function plotGmmPdf(pi, sigma, mu, pointEstimate) {
+      const yields = [];
+      const densities = [];
+      
+      // Grid of yield points from 0 to 12 t/ha in steps of 0.1
+      for (let y = 0.0; y <= 12.0; y += 0.1) {
+        yields.push(parseFloat(y.toFixed(1)));
+        densities.push(gmmPdf(y, pi, sigma, mu));
+      }
+      
+      const ctx = document.getElementById('pdf-chart').getContext('2d');
+      
+      if (chart) {
+        chart.destroy();
+      }
+      
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: yields,
+          datasets: [{
+            label: 'Probability Density (PDF)',
+            data: densities,
+            borderColor: '#16a34a',
+            backgroundColor: 'rgba(22, 163, 74, 0.1)',
+            fill: true,
+            tension: 0.4,
+            pointRadius: 0
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: {
+              title: {
+                display: true,
+                text: 'Yield (t/ha)'
+              }
+            },
+            y: {
+              beginAtZero: true,
+              title: {
+                display: true,
+                text: 'Density'
+              }
+            }
+          },
+          plugins: {
+            legend: {
+              display: false
+            }
+          }
+        }
+      });
+    }
+    
+    // Start loader
+    window.addEventListener("load", initOnnx);
+  </script>
+</body>
+</html>

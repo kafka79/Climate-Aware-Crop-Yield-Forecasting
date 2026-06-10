@@ -7,7 +7,7 @@ def get_parser():
     parser = argparse.ArgumentParser(description="Climate-Aware Crop Yield Forecasting Pipeline")
     
     parser.add_argument("--mode", type=str, required=True, 
-                        choices=["download", "preprocess", "train", "predict", "benchmark", "dashboard"],
+                        choices=["download", "preprocess", "train", "predict", "dashboard"],
                         help="Execution mode")
     
     parser.add_argument("--config", type=str, default="configs/data_config.yaml",

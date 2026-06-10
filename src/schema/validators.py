@@ -22,16 +22,16 @@ def align_and_validate_soil(soil_df, soil_dim: int) -> np.ndarray:
     # Fail loudly if contract is violated
     validated_df = SoilSchema.validate(soil_df)
     
+    expected_cols = ["ph", "soc", "nitrogen"]
+    if len(expected_cols) != soil_dim:
+        raise ValueError(
+            f"Dimension mismatch: validation schema defines {len(expected_cols)} soil features "
+            f"({expected_cols}), but the model requires soil_dim={soil_dim}."
+        )
+
     # Handle empty DataFrame (e.g. only headers present) robustly without raising IndexError on iloc[0]
     if validated_df.empty:
         return np.zeros(soil_dim, dtype=np.float32)
         
-    expected_cols = ["ph", "soc", "nitrogen"]
     soil_values = validated_df[expected_cols].iloc[0].to_numpy(dtype=np.float32)
-    
-    if len(soil_values) >= soil_dim:
-        return soil_values[:soil_dim]
-
-    padded = np.zeros(soil_dim, dtype=np.float32)
-    padded[: len(soil_values)] = soil_values
-    return padded
+    return soil_values

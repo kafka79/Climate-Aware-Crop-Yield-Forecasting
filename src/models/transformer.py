@@ -48,10 +48,11 @@ class MultiModalTransformer(nn.Module):
     def __init__(self, config: Dict[str, Any]):
         super(MultiModalTransformer, self).__init__()
         self.config = config["transformer"]
-        self.use_privacy = config.get("use_privacy", False)
-        self.epsilon = config.get("privacy_epsilon", 0.1)
+        # Legacy config names mapping to correct mathematical terminology (Input Jittering / Perturbation)
+        self.use_jitter = config.get("use_privacy", False)
+        self.jitter_noise_scale = config.get("privacy_epsilon", 0.1)
 
-        soil_dim = self.config.get("soil_dim", 4)
+        soil_dim = self.config.get("soil_dim", 3)
         hidden_dim = self.config["hidden_dim"]
 
         # Satellite encoder: 1D temporal convolution extracts local temporal
@@ -124,14 +125,14 @@ class MultiModalTransformer(nn.Module):
         # 2. Encode weather
         weather_enc, _ = self.weather_encoder(weather)        # (B, T, D)
 
-        # 3. Input perturbation/jittering regularization (mislabeled as "Differential Privacy"
-        # in configuration). NOTE: Adding noise to inputs during training is a standard
+        # 3. Input perturbation/jittering regularization (historically mislabeled as "Differential Privacy"
+        # in configuration names). NOTE: Adding noise to inputs during training is a standard
         # regularization technique, but it does NOT provide formal differential privacy guarantees
         # on model parameters (which would require gradient clipping and noise addition during
         # optimization via DP-SGD/Opacus). Noise is proportional to coordinate sensitivity.
-        if self.training and self.use_privacy:
+        if self.training and self.use_jitter:
             sensitivity = self.soil_sensitivity.abs() + 1e-8  # (F_s,)
-            noise = torch.randn_like(soil) * self.epsilon * sensitivity
+            noise = torch.randn_like(soil) * self.jitter_noise_scale * sensitivity
             soil = soil + noise
 
         # 4. Encode soil (static — NOT concatenated into the temporal sequence)
@@ -176,4 +177,28 @@ def initialize_model(config: Dict[str, Any]):
     """
     logger.info("Initializing MultiModalTransformer...")
     return MultiModalTransformer(config)
+
+
+def load_model_weights(model: nn.Module, model_path: str, device: torch.device) -> None:
+    """
+    Loads model weights, mapping legacy keys (e.g. super_res -> temporal_conv)
+    and handling missing layers with strict=False to ensure backward compatibility.
+    """
+    logger.info(f"Loading weights from {model_path} onto {device}...")
+    state_dict = torch.load(model_path, map_location=device)
+    
+    # Map legacy super_res keys to temporal_conv
+    keys = list(state_dict.keys())
+    for key in keys:
+        if key.startswith("super_res."):
+            new_key = key.replace("super_res.", "temporal_conv.")
+            state_dict[new_key] = state_dict.pop(key)
+            logger.info(f"Mapped legacy weight key: {key} -> {new_key}")
+            
+    # Load state dict with strict=False
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        logger.warning(f"Missing keys in state_dict (initialized randomly): {missing}")
+    if unexpected:
+        logger.warning(f"Unexpected keys in state_dict (ignored): {unexpected}")
 

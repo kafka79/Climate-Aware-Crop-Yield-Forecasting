@@ -89,8 +89,4 @@ class MultiModalCropIterableDataset(IterableDataset):
         # but useful for progress bars if no filtering occurs.
         return len(self.yield_df)
 
-def create_dataloaders(dataset: IterableDataset, batch_size: int, split_ratio: float = 0.8):
-    """
-    Deprecated for IterableDataset. Train/val splitting should occur on DataFrame BEFORE instantiation.
-    """
-    raise NotImplementedError("Split the DataFrame before creating IterableDataset.")
+

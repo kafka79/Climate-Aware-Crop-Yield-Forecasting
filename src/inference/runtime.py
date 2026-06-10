@@ -15,7 +15,7 @@ from src.models.mdn import (
     mdn_safe_point_estimate,
     BimodalDistributionWarning,
 )
-from src.models.transformer import initialize_model
+from src.models.transformer import initialize_model, load_model_weights
 from src.risk.risk_classifier import YieldRiskClassifier
 from src.recommendation.engine import RecommendationEngine
 from src.utils.config import load_config
@@ -433,104 +433,150 @@ def run_inference(
     crop: Optional[str] = None,
     config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    del crop
-    config = load_runtime_config(config_path)
-    prepared = _prepare_model_inputs(config, region, year)
-    model_path = Path("models/checkpoints/best_model.pth")
-    if not model_path.exists():
-        raise InferenceUnavailableError(
-            "Trained checkpoint not found at models/checkpoints/best_model.pth."
+    from src.utils.telemetry import TelemetryTracker, log_business_metric
+    
+    with TelemetryTracker("run_inference") as tracker:
+        tracker.set_attribute("region", region)
+        tracker.set_attribute("year", year)
+        tracker.set_attribute("crop", crop)
+        
+        del crop
+        config = load_runtime_config(config_path)
+        prepared = _prepare_model_inputs(config, region, year)
+        model_path = Path("models/checkpoints/best_model.pth")
+        if not model_path.exists():
+            raise InferenceUnavailableError(
+                "Trained checkpoint not found at models/checkpoints/best_model.pth."
+            )
+
+        model = initialize_model(config)
+        load_model_weights(model, str(model_path), torch.device("cpu"))
+        model.eval()
+
+        with torch.no_grad():
+            output = model(
+                prepared["sat_tensor"], prepared["weather_tensor"], prepared["soil_tensor"]
+            )
+
+        if isinstance(output, tuple):
+            pi, sigma, mu = output
+            # Use the safe estimator: detects bimodal distributions and refuses
+            # to return a valley-mean that sits between two real scenarios.
+            predicted_yield, bimodality_report = mdn_safe_point_estimate(pi, sigma, mu)
+            std = mdn_predictive_std(pi, sigma, mu)
+            predicted_std = float(std.squeeze().cpu().item())
+            
+            # Extract GMM parameters as lists of floats for frontend PDF plotting
+            pi_list = pi[0].cpu().tolist() if pi.dim() > 1 else pi.cpu().tolist()
+            sigma_list = sigma[0, :, 0].cpu().tolist() if sigma.dim() > 2 else (sigma[:, 0].cpu().tolist() if sigma.dim() > 1 else sigma.cpu().tolist())
+            mu_list = mu[0, :, 0].cpu().tolist() if mu.dim() > 2 else (mu[:, 0].cpu().tolist() if mu.dim() > 1 else mu.cpu().tolist())
+            gmm_params = {
+                "pi": pi_list,
+                "sigma": sigma_list,
+                "mu": mu_list
+            }
+        else:
+            predicted_yield = float(output.squeeze().cpu().item())
+            predicted_std = 0.0
+            bimodality_report = {"is_bimodal": False, "modes": [], "dominant_mode": predicted_yield, "valley_depth": 0.0}
+            gmm_params = None
+
+        if predicted_yield <= 0 or predicted_yield >= 15:
+            raise InferenceUnavailableError(
+                f"Checkpoint produced an implausible forecast ({predicted_yield:.3f} t/ha) "
+                "for the selected inputs. Retrain or recalibrate the model before exposing "
+                "live forecasts."
+            )
+
+        region_history = _get_region_history(config, region)
+        historical_average = (
+            float(region_history["yield"].mean()) if not region_history.empty else None
+        )
+        observed_row = region_history[region_history["year"] == year]
+        observed_yield = (
+            float(observed_row.iloc[-1]["yield"]) if not observed_row.empty else None
         )
 
-    model = initialize_model(config)
-    model.load_state_dict(torch.load(model_path, map_location="cpu"))
-    model.eval()
+        classifier = YieldRiskClassifier()
+        if historical_average:
+            risk = classifier.calibrate_with_uncertainty(
+                predicted_yield, predicted_std, historical_average
+            )
+        else:
+            risk = "Unknown"
 
-    with torch.no_grad():
-        output = model(
-            prepared["sat_tensor"], prepared["weather_tensor"], prepared["soil_tensor"]
+        # Resolve soil baseline using regional median, falling back to a sensible default if unavailable
+        soil_dim = prepared["soil_tensor"].shape[-1]
+        soil_median = _compute_regional_soil_median(config, soil_dim)
+        if soil_median is None:
+            soil_median = np.array([6.5, 10.0, 1.5], dtype=np.float32)
+            if len(soil_median) > soil_dim:
+                soil_median = soil_median[:soil_dim]
+            elif len(soil_median) < soil_dim:
+                soil_median = np.pad(soil_median, (0, soil_dim - len(soil_median)))
+        
+        soil_base = torch.tensor(soil_median, dtype=torch.float32).unsqueeze(0)
+
+        explanation_summary, _ = explain_prediction(
+            model,
+            {
+                "sat": prepared["sat_tensor"].squeeze(0),
+                "weather": prepared["weather_tensor"].squeeze(0),
+                "soil": prepared["soil_tensor"].squeeze(0),
+            },
+            baselines={
+                "soil": soil_base
+            }
         )
+        attribution = {
+            "Satellite": round(explanation_summary.get("satellite_overall", 0.0), 4),
+            "Weather": round(explanation_summary.get("weather_overall", 0.0), 4),
+            "Soil": round(explanation_summary.get("soil_overall", 0.0), 4),
+        }
 
-    if isinstance(output, tuple):
-        pi, sigma, mu = output
-        # Use the safe estimator: detects bimodal distributions and refuses
-        # to return a valley-mean that sits between two real scenarios.
-        predicted_yield, bimodality_report = mdn_safe_point_estimate(pi, sigma, mu)
-        std = mdn_predictive_std(pi, sigma, mu)
-        predicted_std = float(std.squeeze().cpu().item())
-    else:
-        predicted_yield = float(output.squeeze().cpu().item())
-        predicted_std = 0.0
-        bimodality_report = {"is_bimodal": False, "modes": [], "dominant_mode": predicted_yield, "valley_depth": 0.0}
+        lower_bound = max(0.0, predicted_yield - 1.96 * predicted_std)
+        upper_bound = predicted_yield + 1.96 * predicted_std
 
-    if predicted_yield <= 0 or predicted_yield >= 15:
-        raise InferenceUnavailableError(
-            f"Checkpoint produced an implausible forecast ({predicted_yield:.3f} t/ha) "
-            "for the selected inputs. Retrain or recalibrate the model before exposing "
-            "live forecasts."
-        )
+        # Surface modality warnings so the dashboard/CLI can show them
+        modality_warnings = prepared.get("modality_warnings", [])
 
-    region_history = _get_region_history(config, region)
-    historical_average = (
-        float(region_history["yield"].mean()) if not region_history.empty else None
-    )
-    observed_row = region_history[region_history["year"] == year]
-    observed_yield = (
-        float(observed_row.iloc[-1]["yield"]) if not observed_row.empty else None
-    )
+        engine = RecommendationEngine(config)
+        advice = engine.generate_advice({
+            "region": region,
+            "predicted_yield": predicted_yield,
+            "lower_bound": lower_bound,
+            "upper_bound": upper_bound,
+            "risk": risk,
+            "attribution": attribution
+        })
 
-    classifier = YieldRiskClassifier()
-    if historical_average:
-        risk = classifier.calibrate_with_uncertainty(
-            predicted_yield, predicted_std, historical_average
-        )
-    else:
-        risk = "Unknown"
+        tracker.set_attribute("predicted_yield", predicted_yield)
+        tracker.set_attribute("prediction_std", predicted_std)
+        tracker.set_attribute("risk", risk)
+        tracker.set_attribute("is_bimodal", bimodality_report.get("is_bimodal", False))
+        
+        log_business_metric("crop_yield_prediction", predicted_yield, "t/ha", {
+            "region": region,
+            "year": str(year),
+            "risk": risk
+        })
 
-    explanation_summary, _ = explain_prediction(
-        model,
-        {
-            "sat": prepared["sat_tensor"].squeeze(0),
-            "weather": prepared["weather_tensor"].squeeze(0),
-            "soil": prepared["soil_tensor"].squeeze(0),
-        },
-    )
-    attribution = {
-        "Satellite": round(explanation_summary.get("satellite_overall", 0.0), 4),
-        "Weather": round(explanation_summary.get("weather_overall", 0.0), 4),
-        "Soil": round(explanation_summary.get("soil_overall", 0.0), 4),
-    }
-
-    lower_bound = max(0.0, predicted_yield - 1.96 * predicted_std)
-    upper_bound = predicted_yield + 1.96 * predicted_std
-
-    # Surface modality warnings so the dashboard/CLI can show them
-    modality_warnings = prepared.get("modality_warnings", [])
-
-    engine = RecommendationEngine(config)
-    advice = engine.generate_advice({
-        "predicted_yield": predicted_yield,
-        "lower_bound": lower_bound,
-        "upper_bound": upper_bound,
-        "risk": risk,
-        "attribution": attribution
-    })
-
-    return {
-        "region": region,
-        "year": year,
-        "predicted_yield": predicted_yield,
-        "prediction_std": predicted_std,
-        "lower_bound": lower_bound,
-        "upper_bound": upper_bound,
-        "risk": risk,
-        "historical_average": historical_average,
-        "observed_yield": observed_yield,
-        "soil_source": prepared["soil_source"],
-        "ndvi_series": prepared["ndvi_series"],
-        "attribution": attribution,
-        "recommendations": advice,
-        "modality_warnings": modality_warnings,
-        "bimodality_report": bimodality_report,
-        "source": "checkpoint+zarr",
-    }
+        return {
+            "region": region,
+            "year": year,
+            "predicted_yield": predicted_yield,
+            "prediction_std": predicted_std,
+            "lower_bound": lower_bound,
+            "upper_bound": upper_bound,
+            "risk": risk,
+            "historical_average": historical_average,
+            "observed_yield": observed_yield,
+            "soil_source": prepared["soil_source"],
+            "ndvi_series": prepared["ndvi_series"],
+            "attribution": attribution,
+            "recommendations": advice,
+            "modality_warnings": modality_warnings,
+            "bimodality_report": bimodality_report,
+            "gmm_params": gmm_params,
+            "source": "checkpoint+zarr",
+        }

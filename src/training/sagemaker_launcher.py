@@ -229,15 +229,27 @@ def main() -> None:
     args = parser.parse_args()
 
     features_dir = Path(args.features_dir)
+    size_gb = 0.0
 
-    if not features_dir.exists():
-        logger.warning(f"Features dir not found: {features_dir} — defaulting to local training.")
-        sys.exit(2)
-
-    size_gb = _dataset_size_gb(features_dir)
-    logger.info(f"Feature store size: {size_gb:.2f} GiB  (threshold: {args.threshold_gb} GiB)")
+    if features_dir.exists():
+        size_gb = _dataset_size_gb(features_dir)
+        logger.info(f"Feature store size (local): {size_gb:.2f} GiB  (threshold: {args.threshold_gb} GiB)")
+    else:
+        logger.warning(f"Local features dir not found: {features_dir}. Checking S3 features size...")
+        if args.s3_bucket:
+            size_gb = _s3_dataset_size_gb(args.s3_bucket, args.s3_features_prefix)
+            logger.info(f"Feature store size (remote S3): {size_gb:.2f} GiB  (threshold: {args.threshold_gb} GiB)")
+        else:
+            logger.error("Local features dir missing, and no S3 bucket specified. Cannot determine dataset size.")
+            sys.exit(1)
 
     if size_gb < args.threshold_gb:
+        if not features_dir.exists():
+            logger.error(
+                f"Dataset size ({size_gb:.2f} GiB) is below SageMaker threshold ({args.threshold_gb} GiB), "
+                "requiring local training, but local features dir does not exist!"
+            )
+            sys.exit(1)
         logger.info(
             f"Dataset ({size_gb:.2f} GiB) is below the SageMaker threshold "
             f"({args.threshold_gb} GiB). Signal: train on GitHub runner."

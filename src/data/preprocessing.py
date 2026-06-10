@@ -53,7 +53,15 @@ class DataPreprocessor:
             logger.warning(f"PCHIP interpolation failed ({e}), falling back to linear.")
             ds = ds.interpolate_na(dim="time", method="linear", limit=5)
             
-        return ds.fillna(0)
+        # Carry the nearest valid observation forward and then backward using nearest interpolation
+        # with extrapolation. This avoids bottleneck dependency for dask chunked arrays.
+        # This prevents physically impossible zero values for satellite bands.
+        # Only use 0.0 as a last resort safety fallback for entirely empty series.
+        try:
+            ds = ds.interpolate_na(dim="time", method="nearest", fill_value="extrapolate")
+        except Exception as e:
+            logger.warning(f"Nearest extrapolation failed ({e}), using fallback.")
+        return ds.fillna(0.0)
     
     def preprocess_weather(self, file_path: str):
         """
@@ -118,7 +126,16 @@ def preprocess_all(config: Dict[str, Any]):
     def process_area(area):
         name = area["name"]
         sat_file = os.path.join(config["paths"]["raw"]["sentinel2"], f"{name}.nc")
-        weather_file = os.path.join(config["paths"]["raw"]["era5"], f"{name}_2023.nc")
+        # Resolve year dynamically instead of hardcoding 2023
+        year = config.get("year", 2023)
+        weather_file = os.path.join(config["paths"]["raw"]["era5"], f"{name}_{year}.nc")
+        if not os.path.exists(weather_file):
+            era5_dir = config["paths"]["raw"]["era5"]
+            if os.path.exists(era5_dir):
+                candidates = [f for f in os.listdir(era5_dir) if f.startswith(f"{name}_") and f.endswith(".nc")]
+                if candidates:
+                    weather_file = os.path.join(era5_dir, candidates[0])
+                    logger.info(f"Dynamically resolved weather file for {name} to {weather_file}")
         
         if os.path.exists(sat_file) and os.path.exists(weather_file):
             ds_sat = preprocessor.preprocess_sentinel(sat_file)

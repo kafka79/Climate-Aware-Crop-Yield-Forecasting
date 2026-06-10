@@ -38,12 +38,13 @@ class RecommendationEngine:
         """
         Uses Gemini to generate a professional agronomic report based on model data.
         """
+        region = result.get("region", "Unknown Region")
         prompt = f"""
         You are a senior agronomic consultant. Analyze the following crop yield forecast data and provide 
         3-4 highly specific, professional recommendations for a farmer or regional planner.
         
         DATA:
-        - Region: {result['region']}
+        - Region: {region}
         - Forecasted Yield: {result['predicted_yield']:.2f} t/ha
         - Confidence Interval: [{result['lower_bound']:.2f} - {result['upper_bound']:.2f}]
         - Risk Level: {result['risk']}
@@ -67,7 +68,7 @@ class RecommendationEngine:
         """
         advice = []
         attr = result["attribution"]
-        risk = result["risk"]
+        risk = str(result.get("risk", "")).upper()
         
         # 1. Attribution-Specific Logic (Dynamic 'Why')
         top_factor = max(attr, key=attr.get)
@@ -80,9 +81,9 @@ class RecommendationEngine:
             advice.append(f"🌱 **Soil Constraints ({attr['Soil']:.0%}):** Regional soil properties are limiting the yield ceiling. Consider a mid-season NPK top-dress if moisture allows.")
 
         # 2. Risk-Based Logic
-        if risk == "HIGH":
+        if "HIGH" in risk:
             advice.append("🚨 **Emergency Action:** Yield is significantly below the 5-year trend. Conduct a field-level audit for water stress or nutrient deficiency immediately.")
-        elif risk == "LOW":
+        elif "LOW" in risk:
             advice.append("📈 **Surplus Opportunity:** Yield is above average. Secure storage and transport logistics early to avoid post-harvest losses.")
 
         # 3. Uncertainty Logic

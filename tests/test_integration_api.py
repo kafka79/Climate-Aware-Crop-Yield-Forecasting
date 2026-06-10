@@ -2,7 +2,13 @@ import pytest
 import responses
 import requests
 import os
+from unittest.mock import patch
 from src.data.downloader import SentinelHubDownloader, ERA5Downloader
+
+@pytest.fixture(autouse=True)
+def mock_sleep():
+    with patch("time.sleep", return_value=None):
+        yield
 
 @pytest.fixture
 def mock_config():

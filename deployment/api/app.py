@@ -4,7 +4,7 @@ import torch
 import os
 from typing import List, Dict, Any
 from src.models.mdn import mdn_expected_value
-from src.models.transformer import initialize_model
+from src.models.transformer import initialize_model, load_model_weights
 from src.utils.config import load_config
 from src.explainability.integrated_gradients import explain_prediction
 
@@ -25,7 +25,7 @@ async def load_model():
     global model
     if os.path.exists(MODEL_PATH):
         model = initialize_model(config)
-        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+        load_model_weights(model, MODEL_PATH, device)
         model.to(device)
         model.eval()
     else:
@@ -46,35 +46,46 @@ def read_root():
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(request: PredictionRequest):
+    from src.utils.telemetry import TelemetryTracker, log_business_metric
+    
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    try:
-        # Convert input to tensors
-        sat = torch.tensor(request.sat, dtype=torch.float32).unsqueeze(0).to(device)
-        weather = torch.tensor(request.weather, dtype=torch.float32).unsqueeze(0).to(device)
-        soil = torch.tensor(request.soil, dtype=torch.float32).unsqueeze(0).to(device)
+    with TelemetryTracker("api_predict") as tracker:
+        tracker.set_attribute("input_sat_shape", [len(request.sat), len(request.sat[0]) if request.sat else 0])
+        tracker.set_attribute("input_weather_shape", [len(request.weather), len(request.weather[0]) if request.weather else 0])
+        tracker.set_attribute("input_soil_shape", len(request.soil))
         
-        # Inference
-        with torch.no_grad():
-            output = model(sat, weather, soil)
-            if isinstance(output, tuple):
-                # Use the mixture mean rather than an invalid broadcasted product.
-                pi, sigma, mu = output
-                prediction = mdn_expected_value(pi, sigma, mu).item()
-            else:
-                prediction = output.item()
-        
-        # Optional: Generate explanation
-        sample = {"sat": sat.squeeze(0), "weather": weather.squeeze(0), "soil": soil.squeeze(0)}
-        explanation_summary, _ = explain_prediction(model, sample)
-        
-        return {
-            "yield_prediction": float(prediction),
-            "explanation": explanation_summary
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        try:
+            # Convert input to tensors
+            sat = torch.tensor(request.sat, dtype=torch.float32).unsqueeze(0).to(device)
+            weather = torch.tensor(request.weather, dtype=torch.float32).unsqueeze(0).to(device)
+            soil = torch.tensor(request.soil, dtype=torch.float32).unsqueeze(0).to(device)
+            
+            # Inference
+            with torch.no_grad():
+                output = model(sat, weather, soil)
+                if isinstance(output, tuple):
+                    # Use the mixture mean rather than an invalid broadcasted product.
+                    pi, sigma, mu = output
+                    prediction = mdn_expected_value(pi, sigma, mu).item()
+                else:
+                    prediction = output.item()
+            
+            tracker.set_attribute("yield_prediction", float(prediction))
+            log_business_metric("api_crop_yield_prediction", float(prediction), "t/ha", {})
+            
+            # Optional: Generate explanation
+            sample = {"sat": sat.squeeze(0), "weather": weather.squeeze(0), "soil": soil.squeeze(0)}
+            explanation_summary, _ = explain_prediction(model, sample)
+            
+            return {
+                "yield_prediction": float(prediction),
+                "explanation": explanation_summary
+            }
+        except Exception as e:
+            tracker.record_exception(e)
+            raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

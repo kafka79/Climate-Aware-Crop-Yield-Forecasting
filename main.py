@@ -94,10 +94,7 @@ def main(args):
                 print(f"- {advice.encode('ascii', 'replace').decode('ascii')}")
         print("="*50 + "\n")
 
-    elif args.mode == "benchmark":
-        logger.info("Starting Model Benchmarking...")
-        from src.training.train import run_benchmark_pipeline
-        run_benchmark_pipeline(args.config)
+
 
     elif args.mode == "dashboard":
         logger.info("Launching Streamlit Dashboard...")

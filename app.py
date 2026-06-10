@@ -79,10 +79,22 @@ hr { border:none; border-top:1px solid #e5e7eb; margin:1.5rem 0; }
 <div id="offline-overlay"></div>
 <div id="offline-banner">
   ⚠ Connection lost — Streamlit requires a live server connection to function.
-  Forecasts and controls are paused until connectivity is restored.
+  Forecasts and controls are paused. You can open the <a href="/app/static/index.html" target="_blank" style="color: #fef3c7; text-decoration: underline; font-weight: 700;">Offline Yield Forecast Tool</a> to run predictions locally via ONNX in your browser.
 </div>
 
 <script>
+// Register Service Worker for offline PWA capabilities
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function() {
+    navigator.serviceWorker.register('/app/static/sw.js', { scope: '/app/static/' })
+      .then(function(reg) {
+        console.log('ServiceWorker registration successful with scope: ', reg.scope);
+      }, function(err) {
+        console.log('ServiceWorker registration failed: ', err);
+      });
+  });
+}
+
 function checkServerConnection() {
   var banner = document.getElementById('offline-banner');
   var overlay = document.getElementById('offline-overlay');
@@ -217,6 +229,60 @@ if prediction:
             f'</div>',
             unsafe_allow_html=True,
         )
+        
+        # Actionable GMM PDF Diagnostic Visualization
+        gmm = prediction.get("gmm_params")
+        if gmm:
+            import math
+            import numpy as np
+            pi_list = gmm["pi"]
+            sigma_list = gmm["sigma"]
+            mu_list = gmm["mu"]
+            
+            # Create a fine grid for plotting from 0.0 to 12.0 t/ha
+            grid_y = np.linspace(0.0, 12.0, 200)
+            grid_pdf = []
+            for y in grid_y:
+                pdf_val = 0.0
+                for w, s, m in zip(pi_list, sigma_list, mu_list):
+                    exponent = -((y - m) ** 2) / (2 * (s ** 2))
+                    coeff = w / (s * math.sqrt(2 * math.pi))
+                    pdf_val += coeff * math.exp(exponent)
+                grid_pdf.append(pdf_val)
+                
+            pdf_df = pd.DataFrame({"Yield (t/ha)": grid_y, "Probability Density": grid_pdf})
+            fig_pdf = px.area(
+                pdf_df,
+                x="Yield (t/ha)",
+                y="Probability Density",
+                title="Crop Yield Probability Distribution (GMM PDF Diagnostic)",
+                template="plotly_white"
+            )
+            fig_pdf.update_traces(
+                line=dict(color="#d97706", width=2),
+                fillcolor="rgba(217,119,6,0.1)"
+            )
+            # Vertical line for prediction point estimate (dominant mode)
+            fig_pdf.add_vline(
+                x=prediction["predicted_yield"],
+                line_dash="dash",
+                line_color="#111827",
+                annotation_text="Dominant Mode"
+            )
+            # Vertical lines for each mode
+            for w, m in br.get("modes", []):
+                fig_pdf.add_vline(
+                    x=m,
+                    line_dash="dot",
+                    line_color="#f59e0b",
+                    annotation_text=f"Mode ({w:.0%})"
+                )
+            fig_pdf.update_layout(
+                height=300,
+                margin=dict(l=0, r=0, t=40, b=0),
+                font=dict(family="Inter, -apple-system, sans-serif")
+            )
+            st.plotly_chart(fig_pdf, use_container_width=True)
 
 st.markdown("---")
 
