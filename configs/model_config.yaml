@@ -8,7 +8,9 @@ transformer:
   num_heads: 4      # Matched to hidden_dim/32
   num_layers: 2     # Shallow on small data; scale up with real data
   dropout: 0.3      # Increased from 0.1 — primary regularisation on <100 samples
-  soil_sensitivity: [1.0, 5.0, 20.0]  # dynamic ranges of ph, soc, nitrogen for differential privacy
+  soil_sensitivity: [1.0, 5.0, 20.0]  # dynamic ranges of ph, soc, nitrogen for input perturbation noise scaling
+  use_jitter: false
+  jitter_noise_scale: 0.1
 
 mdn:
   num_mixtures: 5  # Number of Gaussian components for yield distribution

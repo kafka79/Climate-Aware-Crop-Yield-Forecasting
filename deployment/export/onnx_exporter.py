@@ -58,12 +58,14 @@ def export_to_onnx(
         opset_version=17,
         do_constant_folding=True,
         input_names=["satellite", "weather", "soil"],
-        output_names=["yield_prediction"],
+        output_names=["pi", "sigma", "mu"],
         dynamic_axes={
             "satellite": {0: "batch_size"},
             "weather":   {0: "batch_size"},
             "soil":      {0: "batch_size"},
-            "yield_prediction": {0: "batch_size"},
+            "pi":        {0: "batch_size"},
+            "sigma":     {0: "batch_size"},
+            "mu":        {0: "batch_size"},
         },
     )
     logger.success(f"ONNX model exported successfully → {output_path}")

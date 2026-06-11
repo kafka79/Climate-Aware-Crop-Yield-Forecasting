@@ -36,6 +36,7 @@ class MockDataGenerator:
 
     def generate_sentinel_netcdf(self, name: str, bbox: list, time_range: tuple):
         logger.info(f"Generating mock Sentinel NetCDF for {name}...")
+        np.random.seed(42)
         times = pd.date_range(start=time_range[0], end=time_range[1], freq='15D')
         
         # Approximate 50km box as roughly 0.5 degrees. Let's make an 10x10 grid.
@@ -64,6 +65,7 @@ class MockDataGenerator:
 
     def generate_era5_netcdf(self, name: str, bbox: list, year: int):
         logger.info(f"Generating mock ERA5 NetCDF for {name} ({year})...")
+        np.random.seed(42)
         times = pd.date_range(start=f"{year}-01-01", end=f"{year}-12-31", freq='1D')
         lats = np.linspace(bbox[1], bbox[3], 5)
         lons = np.linspace(bbox[0], bbox[2], 5)
@@ -88,6 +90,7 @@ class MockDataGenerator:
 
     def generate_soil_csv(self, name: str):
         logger.info(f"Generating mock soil CSV for {name}...")
+        np.random.seed(42)
         soil_data = {
             "ph": 6.5 + np.random.normal(0, 0.1),
             "soc": 12.5 + np.random.normal(0, 0.5),

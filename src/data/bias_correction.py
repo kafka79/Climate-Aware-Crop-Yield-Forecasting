@@ -41,6 +41,16 @@ class DataBiasCorrector:
         logger.info(f"Applying Box-Cox transformation to series: {series.name} (shift={shift})")
         transformed_series, lmbda = stats.boxcox(series + shift)
         return pd.Series(transformed_series, index=series.index), lmbda
+
+    def apply_inverse_skew_correction(self, val: float, lmbda: float, shift: float) -> float:
+        """
+        Apply inverse Box-Cox transformation to restore original units.
+        """
+        if abs(lmbda) < 1e-19:
+            res = np.exp(val)
+        else:
+            res = (val * lmbda + 1.0) ** (1.0 / lmbda)
+        return float(res - shift)
     
     def balance_risk_classes(self, df: pd.DataFrame, target_col: str):
         """

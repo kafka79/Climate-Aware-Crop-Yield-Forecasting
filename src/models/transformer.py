@@ -28,29 +28,15 @@ class PositionalEncoding(nn.Module):
 class MultiModalTransformer(nn.Module):
     """
     Multi-Modal Transformer for Crop Yield Prediction.
-    Fuses Satellite (Spectral), Weather (Temporal), and Soil (Static) data
-    using cross-modal attention before self-attention refinement.
-
-    Architecture (post-fix):
-    ────────────────────────
-    1. Satellite encoder  → (B, T, D)  via 1D conv + linear residual
-    2. Weather encoder    → (B, T, D)  via LSTM
-    3. Cross-modal attn   → (B, T, D)  satellite queries attend to weather
-    4. Temporal self-attn  → (B, 2T, D) refine temporal features ONLY
-    5. Temporal pooling   → (B, D)     pool time dimension
-    6. Concat soil        → (B, 2D)    static features join AFTER pooling
-    7. Fusion MLP         → (B, D)     project fused repr to hidden dim
-    8. MDN output head    → GMM params
-
-    Previous version concatenated soil (B, 1, D) into the temporal sequence
-    (B, 2T+1, D) and then averaged, diluting soil by a factor of 2T+1.
+    Fuses Satellite (Spectral), Weather (Temporal), and Soil (Static) data.
     """
     def __init__(self, config: Dict[str, Any]):
         super(MultiModalTransformer, self).__init__()
         self.config = config["transformer"]
-        # Legacy config names mapping to correct mathematical terminology (Input Jittering / Perturbation)
-        self.use_jitter = config.get("use_privacy", False)
-        self.jitter_noise_scale = config.get("privacy_epsilon", 0.1)
+        # Input perturbation/jittering regularization (historically mislabeled as "Differential Privacy"
+        # in configuration names). Maintaining compatibility with legacy keys.
+        self.use_jitter = self.config.get("use_jitter", config.get("use_privacy", False))
+        self.jitter_noise_scale = self.config.get("jitter_noise_scale", config.get("privacy_epsilon", 0.1))
 
         soil_dim = self.config.get("soil_dim", 3)
         hidden_dim = self.config["hidden_dim"]
@@ -69,12 +55,6 @@ class MultiModalTransformer(nn.Module):
                                       batch_first=True)
         self.soil_encoder = nn.Linear(soil_dim, hidden_dim)
 
-        # Temporal fusion layer to map fused satellite and weather features back to hidden_dim
-        self.temporal_fusion = nn.Linear(2 * hidden_dim, hidden_dim)
-
-        # Positional Encoding for temporal self-attention
-        self.pos_encoder = PositionalEncoding(d_model=hidden_dim, max_len=100)
-
         # Transformer Layers (applied to temporal features ONLY)
         encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim,
                                                   nhead=self.config["num_heads"],
@@ -82,24 +62,11 @@ class MultiModalTransformer(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer,
                                                          num_layers=self.config["num_layers"])
 
-        # Cross-Modal Attention: satellite queries attend to weather keys/values
-        # to learn which weather conditions are most relevant for each spectral timestep.
+        # Cross-Modal Attention: satellite queries attend to weather and soil context
         self.cross_attn = nn.MultiheadAttention(embed_dim=hidden_dim,
                                                 num_heads=self.config["num_heads"])
 
-        # Fusion MLP: projects concatenated [temporal_pool ‖ soil] → hidden_dim
-        # so the MDN head sees a properly weighted combination.
-        self.fusion_mlp = nn.Sequential(
-            nn.Linear(hidden_dim + hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.config["dropout"]),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-
-        # Static per-feature sensitivity for differential-privacy noise scaling.
-        # This prevents the model from driving the sensitivity to zero via backpropagation
-        # to bypass the privacy noise. The sensitivity is set based on the expected dynamic 
-        # range of each feature (e.g. soil_sensitivity config: [1.0, 5.0, 20.0]).
+        # Static per-feature sensitivity for input perturbation noise scaling.
         sensitivity_vals = self.config.get("soil_sensitivity", [1.0] * soil_dim)
         self.register_buffer("soil_sensitivity", torch.tensor(sensitivity_vals, dtype=torch.float32))
 
@@ -125,24 +92,20 @@ class MultiModalTransformer(nn.Module):
         # 2. Encode weather
         weather_enc, _ = self.weather_encoder(weather)        # (B, T, D)
 
-        # 3. Input perturbation/jittering regularization (historically mislabeled as "Differential Privacy"
-        # in configuration names). NOTE: Adding noise to inputs during training is a standard
-        # regularization technique, but it does NOT provide formal differential privacy guarantees
-        # on model parameters (which would require gradient clipping and noise addition during
-        # optimization via DP-SGD/Opacus). Noise is proportional to coordinate sensitivity.
+        # 3. Input perturbation/jittering regularization
         if self.training and self.use_jitter:
             sensitivity = self.soil_sensitivity.abs() + 1e-8  # (F_s,)
             noise = torch.randn_like(soil) * self.jitter_noise_scale * sensitivity
             soil = soil + noise
 
-        # 4. Encode soil (static — NOT concatenated into the temporal sequence)
-        soil_enc = self.soil_encoder(soil)                    # (B, D)
+        # 4. Encode soil
+        soil_enc = self.soil_encoder(soil).unsqueeze(1)       # (B, 1, D)
 
-        # 5. Cross-modal attention: satellite queries attend to BOTH weather and soil context
+        # 5. Cross-modal attention: satellite queries attend to weather/soil context
         # nn.MultiheadAttention expects (Seq, Batch, Dim)
         sat_q = sat_enc.permute(1, 0, 2)                      # (T, B, D)
         weather_kv = weather_enc.permute(1, 0, 2)             # (T, B, D)
-        soil_kv = soil_enc.unsqueeze(0)                       # (1, B, D)
+        soil_kv = soil_enc.permute(1, 0, 2)                   # (1, B, D)
         
         # Combine weather and soil into a single context sequence for cross-attention
         context_kv = torch.cat([weather_kv, soil_kv], dim=0)  # (T+1, B, D)
@@ -150,25 +113,19 @@ class MultiModalTransformer(nn.Module):
         cross_out, _ = self.cross_attn(sat_q, context_kv, context_kv)  # (T, B, D)
         cross_out = cross_out.permute(1, 0, 2)                # (B, T, D)
 
-        # 6. Fuse TEMPORAL features at each timestep to preserve alignment, then refine via self-attention
-        temporal_fused = torch.cat([cross_out, weather_enc], dim=2)  # (B, T, 2D)
-        temporal_fused = self.temporal_fusion(temporal_fused)        # (B, T, D)
-        temporal_fused = self.pos_encoder(temporal_fused)            # (B, T, D) Add Positional Encoding
-        temporal_fused = temporal_fused.permute(1, 0, 2)            # (T, B, D)
-        temporal_out = self.transformer_encoder(temporal_fused)
-        temporal_out = temporal_out.permute(1, 0, 2)                # (B, T, D)
+        # 6. Concatenate cross-attended satellite, weather, and soil
+        fused = torch.cat([cross_out, weather_enc, soil_enc], dim=1)  # (B, 2T+1, D)
+        
+        # 7. Transformer self-attention refinement
+        fused = fused.permute(1, 0, 2)                        # (2T+1, B, D)
+        out = self.transformer_encoder(fused)
+        out = out.permute(1, 0, 2)                            # (B, 2T+1, D)
 
-        # 7. Pool temporal dimension → (B, D)
-        temporal_pooled = torch.mean(temporal_out, dim=1)     # (B, D)
+        # 8. Global Average Pooling over time/modalities
+        out = torch.mean(out, dim=1)                          # (B, D)
 
-        # 8. Concatenate pooled temporal with STATIC soil (no dilution)
-        fused = torch.cat([temporal_pooled, soil_enc], dim=1) # (B, 2D)
-
-        # 9. Fusion MLP projects back to hidden_dim
-        fused = self.fusion_mlp(fused)                        # (B, D)
-
-        # 10. MDN Output
-        return self.mdn_head(fused)
+        # 9. MDN Output
+        return self.mdn_head(out)
 
 
 def initialize_model(config: Dict[str, Any]):

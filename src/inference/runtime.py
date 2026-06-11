@@ -7,6 +7,56 @@ import numpy as np
 import pandas as pd
 import torch
 import xarray as xr
+import json
+from loguru import logger
+
+class SafeCacheSerializer:
+    """
+    Secure caching serializer that replaces pickle with standard JSON serialization.
+    Specifically handles PyTorch tensors and Xarray DataArrays.
+    """
+    @staticmethod
+    def serialize(data: dict) -> str:
+        serializable = {}
+        for k, v in data.items():
+            if isinstance(v, torch.Tensor):
+                serializable[k] = {
+                    "__type__": "torch.Tensor",
+                    "data": v.cpu().numpy().tolist(),
+                    "dtype": str(v.dtype).replace("torch.", "")
+                }
+            elif isinstance(v, xr.DataArray):
+                serializable[k] = {
+                    "__type__": "xr.DataArray",
+                    "data": v.to_dict()
+                }
+            elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], torch.Tensor):
+                serializable[k] = {
+                    "__type__": "list[torch.Tensor]",
+                    "data": [t.cpu().numpy().tolist() for t in v]
+                }
+            else:
+                serializable[k] = v
+        return json.dumps(serializable)
+
+    @staticmethod
+    def deserialize(json_str: str) -> dict:
+        parsed = json.loads(json_str)
+        deserialized = {}
+        for k, v in parsed.items():
+            if isinstance(v, dict) and "__type__" in v:
+                t = v["__type__"]
+                if t == "torch.Tensor":
+                    dtype_map = {"float32": torch.float32, "float64": torch.float64, "int64": torch.int64}
+                    dt = dtype_map.get(v["dtype"], torch.float32)
+                    deserialized[k] = torch.tensor(v["data"], dtype=dt)
+                elif t == "xr.DataArray":
+                    deserialized[k] = xr.DataArray.from_dict(v["data"])
+                elif t == "list[torch.Tensor]":
+                    deserialized[k] = [torch.tensor(item, dtype=torch.float32) for item in v["data"]]
+            else:
+                deserialized[k] = v
+        return deserialized
 
 from src.explainability.integrated_gradients import explain_prediction
 from src.models.mdn import (
@@ -284,7 +334,7 @@ def _prepare_model_inputs(
             cached = r.get(cache_key)
             if cached:
                 logger.debug(f"Cache hit for {cache_key}")
-                return pickle.loads(cached)
+                return SafeCacheSerializer.deserialize(cached)
         except Exception as e:
             logger.warning(f"Redis cache error (read): {e}")
 
@@ -351,7 +401,7 @@ def _prepare_model_inputs(
     
     if r is not None:
         try:
-            r.setex(cache_key, 3600, pickle.dumps(result))
+            r.setex(cache_key, 3600, SafeCacheSerializer.serialize(result))
             logger.debug(f"Cached {cache_key} for 1 hour")
         except Exception as e:
             logger.warning(f"Redis cache error (write): {e}")
@@ -460,9 +510,11 @@ def run_inference(
 
         if isinstance(output, tuple):
             pi, sigma, mu = output
+            logger.info(f"Model outputs: pi={pi}, sigma={sigma}, mu={mu}")
             # Use the safe estimator: detects bimodal distributions and refuses
             # to return a valley-mean that sits between two real scenarios.
             predicted_yield, bimodality_report = mdn_safe_point_estimate(pi, sigma, mu)
+            logger.info(f"mdn_safe_point_estimate returned: yield={predicted_yield}, report={bimodality_report}")
             std = mdn_predictive_std(pi, sigma, mu)
             predicted_std = float(std.squeeze().cpu().item())
             

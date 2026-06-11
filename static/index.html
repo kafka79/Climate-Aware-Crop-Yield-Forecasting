@@ -433,38 +433,18 @@
         const feeds = { satellite: satTensor, weather: weatherTensor, soil: soilTensor };
         const results = await session.run(feeds);
         
-        // Extract GMM Parameters from the three outputs
-        // PyTorch ONNX exporter returns (pi, sigma, mu)
-        const outputNames = Object.keys(results);
+        // Extract GMM Parameters from the named outputs (pi, sigma, mu)
+        const piTensor = results.pi;
+        const sigmaTensor = results.sigma;
+        const muTensor = results.mu;
         
-        // Since exporter output names might be dynamic, we find them by shape
-        let piTensor, sigmaTensor, muTensor;
-        for (const name of outputNames) {
-          const tensor = results[name];
-          if (tensor.dims.length === 2) {
-            piTensor = tensor;
-          } else if (tensor.dims.length === 3) {
-            // Distinguish sigma vs mu: sigma in model is Softplus (positives), mu is linear
-            if (sigmaTensor) {
-              muTensor = tensor;
-            } else {
-              sigmaTensor = tensor; // Assign temporally, sorted later if needed
-            }
-          }
+        if (!piTensor || !sigmaTensor || !muTensor) {
+          throw new Error("Missing expected GMM outputs (pi, sigma, mu) from ONNX model.");
         }
         
-        // Handle fallback if shapes differ
-        if (!piTensor || !sigmaTensor) {
-          throw new Error("Unexpected GMM shape returned from ONNX export.");
-        }
-        
-        // If we assigned mu/sigma backwards, check softplus (sigma values should not be highly negative)
-        const arr1 = sigmaTensor.data;
-        const arr2 = muTensor ? muTensor.data : null;
-        // In GMM, sigma is positive. Let's make sure we map them correctly
         let piData = Array.from(piTensor.data);
-        let sigmaData = Array.from(arr1);
-        let muData = arr2 ? Array.from(arr2) : [0];
+        let sigmaData = Array.from(sigmaTensor.data);
+        let muData = Array.from(muTensor.data);
         
         // GMM has 5 mixtures (config). Reshape to component lists
         const numMixtures = piData.length;

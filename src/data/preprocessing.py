@@ -115,6 +115,45 @@ class DataPreprocessor:
         logger.success("Fusion-ready alignment complete.")
         return sat_ds, weather_ds
 
+def process_area(area, config: Dict[str, Any], preprocessor: DataPreprocessor) -> List[Any]:
+    name = area["name"]
+    sat_file = os.path.join(config["paths"]["raw"]["sentinel2"], f"{name}.nc")
+    # Resolve year dynamically instead of hardcoding 2023
+    year = config.get("year", 2023)
+    weather_file = os.path.join(config["paths"]["raw"]["era5"], f"{name}_{year}.nc")
+    if not os.path.exists(weather_file):
+        era5_dir = config["paths"]["raw"]["era5"]
+        if os.path.exists(era5_dir):
+            candidates = [f for f in os.listdir(era5_dir) if f.startswith(f"{name}_") and f.endswith(".nc")]
+            if candidates:
+                weather_file = os.path.join(era5_dir, candidates[0])
+                logger.info(f"Dynamically resolved weather file for {name} to {weather_file}")
+    
+    if os.path.exists(sat_file) and os.path.exists(weather_file):
+        ds_sat = preprocessor.preprocess_sentinel(sat_file)
+        ds_weather = preprocessor.preprocess_weather(weather_file)
+        
+        if ds_sat is not None and ds_weather is not None:
+            # Fill temporal gaps in satellite data before fusion
+            ds_sat = preprocessor.fill_temporal_gaps(ds_sat)
+            
+            final_sat, final_weather = preprocessor.align_modalities(ds_sat, ds_weather)
+            
+            # Force uniform chunking for Zarr compatibility
+            final_sat = final_sat.chunk({"time": -1, "lat": 10, "lon": 10})
+            final_weather = final_weather.chunk({"time": -1, "lat": 10, "lon": 10})
+
+            # Save processed data as Zarr for better lazy-loading performance
+            out_dir = config["paths"]["processed"]["features"]
+            os.makedirs(out_dir, exist_ok=True)
+            
+            # Use compute=False to build a delayed graph instead of executing immediately
+            sat_write = final_sat.to_zarr(os.path.join(out_dir, f"{name}_sat_proc.zarr"), mode="w", compute=False)
+            weather_write = final_weather.to_zarr(os.path.join(out_dir, f"{name}_weather_proc.zarr"), mode="w", compute=False)
+            return [sat_write, weather_write]
+            
+    return []
+
 def preprocess_all(config: Dict[str, Any]):
     """
     Main function to execute the preprocessing pipeline across all study areas.
@@ -122,42 +161,12 @@ def preprocess_all(config: Dict[str, Any]):
     import dask
     preprocessor = DataPreprocessor(config)
     
-    @dask.delayed
-    def process_area(area):
-        name = area["name"]
-        sat_file = os.path.join(config["paths"]["raw"]["sentinel2"], f"{name}.nc")
-        # Resolve year dynamically instead of hardcoding 2023
-        year = config.get("year", 2023)
-        weather_file = os.path.join(config["paths"]["raw"]["era5"], f"{name}_{year}.nc")
-        if not os.path.exists(weather_file):
-            era5_dir = config["paths"]["raw"]["era5"]
-            if os.path.exists(era5_dir):
-                candidates = [f for f in os.listdir(era5_dir) if f.startswith(f"{name}_") and f.endswith(".nc")]
-                if candidates:
-                    weather_file = os.path.join(era5_dir, candidates[0])
-                    logger.info(f"Dynamically resolved weather file for {name} to {weather_file}")
+    tasks = []
+    for area in config.get("study_areas", []):
+        tasks.extend(process_area(area, config, preprocessor))
         
-        if os.path.exists(sat_file) and os.path.exists(weather_file):
-            ds_sat = preprocessor.preprocess_sentinel(sat_file)
-            ds_weather = preprocessor.preprocess_weather(weather_file)
-            
-            if ds_sat is not None and ds_weather is not None:
-                # Fill temporal gaps in satellite data before fusion
-                ds_sat = preprocessor.fill_temporal_gaps(ds_sat)
-                
-                final_sat, final_weather = preprocessor.align_modalities(ds_sat, ds_weather)
-                
-                # Force uniform chunking for Zarr compatibility
-                final_sat = final_sat.chunk({"time": -1, "lat": 10, "lon": 10})
-                final_weather = final_weather.chunk({"time": -1, "lat": 10, "lon": 10})
-
-                # Save processed data as Zarr for better lazy-loading performance
-                out_dir = config["paths"]["processed"]["features"]
-                os.makedirs(out_dir, exist_ok=True)
-                final_sat.to_zarr(os.path.join(out_dir, f"{name}_sat_proc.zarr"), mode="w")
-                final_weather.to_zarr(os.path.join(out_dir, f"{name}_weather_proc.zarr"), mode="w")
-                
-    tasks = [process_area(area) for area in config.get("study_areas", [])]
-    dask.compute(*tasks)
+    if tasks:
+        logger.info(f"Computing {len(tasks)} preprocessing tasks in parallel...")
+        dask.compute(*tasks)
                 
     logger.success("Preprocessing phase complete.")

@@ -80,13 +80,46 @@ class UPAgDownloader(DataDownloader):
         self.base_url = "https://api.upag.gov.in/v1"
         self.api_key = os.getenv("UPAG_API_KEY", "YOUR_API_KEY")
 
-    def download_yield_data(self, state: str, crop: str, year_range: Tuple[int, int]):
+    def download_yield_data(self, state: str, crop: str, year_range: Tuple[int, int]) -> pd.DataFrame:
         logger.info(f"Fetching UPAg APY data for {crop} in {state} ({year_range})...")
-        if self.api_key == "YOUR_API_KEY":
+        if self.api_key == "YOUR_API_KEY" or not self.api_key:
             raise ValueError("UPAg API key is missing. Set UPAG_API_KEY environment variable. Mock generation is disabled for production.")
         
-        # Real API call placeholder
-        raise NotImplementedError("Actual UPAg API integration requires production credentials.")
+        import requests
+        headers = {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
+        params = {
+            "state": state,
+            "crop": crop,
+            "start_year": year_range[0],
+            "end_year": year_range[1]
+        }
+        try:
+            response = requests.get(f"{self.base_url}/apy-statistics", headers=headers, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            records = []
+            for item in data.get("data", []):
+                records.append({
+                    "site_id": state,
+                    "time": f"{item.get('year')}-12-31",
+                    "yield": float(item.get("yield_t_ha", 0.0)),
+                    "lat": float(item.get("latitude", 0.0)),
+                    "lon": float(item.get("longitude", 0.0))
+                })
+            
+            if not records:
+                raise RuntimeError("UPAg API returned no records for the requested parameters.")
+                
+            df = pd.DataFrame(records)
+            target_path = os.path.join(self.raw_path["yield"], "historical_yield.csv")
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            df.to_csv(target_path, index=False)
+            logger.success(f"Yield data saved to {target_path}")
+            return df
+        except Exception as e:
+            logger.error(f"UPAg API request failed: {e}")
+            raise RuntimeError(f"Failed to fetch APY statistics from UPAg: {e}")
 
     def download(self, region: str, crop: str, year_range: Tuple[int, int]):
         return self.download_yield_data(region, crop, year_range)
@@ -130,7 +163,17 @@ class SentinelHubDownloader(DataDownloader):
             raise  # Re-raising for the integration test to catch it
 
     def download(self, bbox: List[float], time_range: Tuple[str, str], name: str):
-        evalscript = "return [B04, B03, B02, B08]" # RGB + NIR
+        evalscript = """//VERSION=3
+        function setup() {
+            return {
+                input: ["B04", "B03", "B02", "B08"],
+                output: { bands: 4 }
+            };
+        }
+        function evaluatePixel(sample) {
+            return [sample.B04, sample.B03, sample.B02, sample.B08];
+        }
+        """
         output_path = os.path.join(self.raw_path["sentinel2"], f"{name}.tiff")
         self.download_tile(bbox, time_range, evalscript, output_path)
 
@@ -145,8 +188,10 @@ class ERA5Downloader(DataDownloader):
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=10, max=120))
     def download(self, bbox: List[float], year: int, name: str):
         if not self.cds_client:
-            logger.error("CDS API client not available.")
-            return
+            raise ImportError(
+                "CDS API client (cdsapi) is not installed or configured. "
+                "Install with: pip install cdsapi"
+            )
 
         logger.info(f"Downloading ERA5 data for {year} in {name}...")
         target_path = os.path.join(self.raw_path["era5"], f"{name}_{year}.nc")

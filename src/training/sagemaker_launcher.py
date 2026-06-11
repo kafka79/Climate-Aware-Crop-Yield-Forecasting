@@ -56,6 +56,24 @@ def _dataset_size_gb(features_dir: Path) -> float:
     return total / (1024 ** 3)
 
 
+def _s3_dataset_size_gb(s3_bucket: str, s3_features_prefix: str) -> float:
+    """Calculate the total size of processed Zarr files stored in S3 in GiB."""
+    try:
+        import boto3
+    except ImportError:
+        raise RuntimeError(
+            "boto3 is required to check S3 dataset size. Install with: pip install boto3"
+        )
+    s3 = boto3.client("s3")
+    total_bytes = 0
+    paginator = s3.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=s3_bucket, Prefix=s3_features_prefix):
+        for obj in page.get('Contents', []):
+            total_bytes += obj['Size']
+    return total_bytes / (1024 ** 3)
+
+
+
 # ── SageMaker launcher ────────────────────────────────────────────────────────
 
 def launch_sagemaker_training(

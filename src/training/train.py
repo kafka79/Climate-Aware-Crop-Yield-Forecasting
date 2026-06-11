@@ -91,7 +91,7 @@ def run_training_pipeline(config_path: str):
             indices = np.arange(len(area_yield_df))
             np.random.seed(42)
             np.random.shuffle(indices)
-            split_idx = int(len(area_yield_df) * config["training"]["val_split"])
+            split_idx = int(len(area_yield_df) * (1.0 - config["training"]["val_split"]))
             
             train_idx, val_idx = indices[:split_idx], indices[split_idx:]
             

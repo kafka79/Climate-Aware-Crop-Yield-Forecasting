@@ -4,10 +4,22 @@ from loguru import logger
 from typing import Dict, Any
 
 def load_config(config_path: str) -> Dict[str, Any]:
-    """Load a YAML configuration file."""
+    """Load a YAML configuration file and merge secrets/environment variables."""
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     logger.debug(f"Loaded config from {config_path}")
+    
+    # Merge credentials/secrets automatically
+    try:
+        secrets = load_secrets()
+        for k, v in secrets.items():
+            if k in config and isinstance(config[k], dict) and isinstance(v, dict):
+                config[k].update(v)
+            else:
+                config[k] = v
+    except Exception as e:
+        logger.warning(f"Could not load secrets: {e}")
+        
     return config
 
 def load_secrets(secrets_path: str = "configs/secrets.yaml") -> Dict[str, Any]:

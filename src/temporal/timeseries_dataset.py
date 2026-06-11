@@ -26,18 +26,32 @@ class MultiModalCropIterableDataset(IterableDataset):
         logger.info(f"Initialized IterableDataset with {len(self.yield_df)} samples.")
 
     def __iter__(self) -> Iterator[dict]:
-        worker_info = torch.utils.data.get_worker_info()
+        import torch.distributed as dist
         
-        if worker_info is None:
-            worker_df = self.yield_df
-            worker_soil = self.soil_vectors
+        # Step 1: Partition data across DDP process ranks
+        if dist.is_initialized():
+            rank = dist.get_rank()
+            world_size = dist.get_world_size()
+            indices = np.arange(len(self.yield_df))
+            rank_indices = indices[rank::world_size]
+            rank_df = self.yield_df.iloc[rank_indices]
+            rank_soil = self.soil_vectors[rank_indices]
         else:
-            per_worker = int(math.ceil(len(self.yield_df) / float(worker_info.num_workers)))
+            rank_df = self.yield_df
+            rank_soil = self.soil_vectors
+
+        # Step 2: Partition rank slice across DataLoader worker subprocesses
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            worker_df = rank_df
+            worker_soil = rank_soil
+        else:
+            per_worker = int(math.ceil(len(rank_df) / float(worker_info.num_workers)))
             worker_id = worker_info.id
             start = worker_id * per_worker
-            end = min(start + per_worker, len(self.yield_df))
-            worker_df = self.yield_df.iloc[start:end]
-            worker_soil = self.soil_vectors[start:end]
+            end = min(start + per_worker, len(rank_df))
+            worker_df = rank_df.iloc[start:end]
+            worker_soil = rank_soil[start:end]
 
         if len(worker_df) == 0:
             return iter([])
