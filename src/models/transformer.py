@@ -33,10 +33,9 @@ class MultiModalTransformer(nn.Module):
     def __init__(self, config: Dict[str, Any]):
         super(MultiModalTransformer, self).__init__()
         self.config = config["transformer"]
-        # Input perturbation/jittering regularization (historically mislabeled as "Differential Privacy"
-        # in configuration names). Maintaining compatibility with legacy keys.
-        self.use_jitter = self.config.get("use_jitter", config.get("use_privacy", False))
-        self.jitter_noise_scale = self.config.get("jitter_noise_scale", config.get("privacy_epsilon", 0.1))
+        # Input perturbation/jittering regularization to add noise to soil inputs during training.
+        self.use_jitter = self.config.get("use_jitter", False)
+        self.jitter_noise_scale = self.config.get("jitter_noise_scale", 0.1)
 
         soil_dim = self.config.get("soil_dim", 3)
         hidden_dim = self.config["hidden_dim"]
@@ -113,15 +112,16 @@ class MultiModalTransformer(nn.Module):
         cross_out, _ = self.cross_attn(sat_q, context_kv, context_kv)  # (T, B, D)
         cross_out = cross_out.permute(1, 0, 2)                # (B, T, D)
 
-        # 6. Concatenate cross-attended satellite, weather, and soil
-        fused = torch.cat([cross_out, weather_enc, soil_enc], dim=1)  # (B, 2T+1, D)
+        # 6. Sum-based multimodal fusion (preserving temporal alignment)
+        # Broadcast soil_enc (B, 1, D) to (B, T, D) during addition
+        fused = cross_out + weather_enc + soil_enc            # (B, T, D)
         
         # 7. Transformer self-attention refinement
-        fused = fused.permute(1, 0, 2)                        # (2T+1, B, D)
+        fused = fused.permute(1, 0, 2)                        # (T, B, D)
         out = self.transformer_encoder(fused)
-        out = out.permute(1, 0, 2)                            # (B, 2T+1, D)
+        out = out.permute(1, 0, 2)                            # (B, T, D)
 
-        # 8. Global Average Pooling over time/modalities
+        # 8. Global Average Pooling over time
         out = torch.mean(out, dim=1)                          # (B, D)
 
         # 9. MDN Output

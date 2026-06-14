@@ -100,11 +100,13 @@ def _extract_ndvi(zarr_path: Path, years: Optional[List[int]] = None) -> Optiona
             total_elements = nir_da.size
             if total_elements > max_points:
                 slices = {}
-                num_dims = len(nir_da.dims)
-                if num_dims > 0:
-                    stride = int(np.ceil((total_elements / max_points) ** (1.0 / num_dims)))
+                # Only stride spatial dimensions (lat, lon) to keep full temporal resolution
+                spatial_dims = [dim for dim in nir_da.dims if dim in ("lat", "lon")]
+                num_spatial = len(spatial_dims)
+                if num_spatial > 0:
+                    stride = int(np.ceil((total_elements / max_points) ** (1.0 / num_spatial)))
                     if stride > 1:
-                        for dim in nir_da.dims:
+                        for dim in spatial_dims:
                             slices[dim] = slice(None, None, stride)
                 if slices:
                     nir_da = nir_da.isel(**slices)
@@ -144,11 +146,13 @@ def _extract_weather_feature(zarr_path: Path, variable: str = "t2m", years: Opti
             total_elements = da.size
             if total_elements > max_points:
                 slices = {}
-                num_dims = len(da.dims)
-                if num_dims > 0:
-                    stride = int(np.ceil((total_elements / max_points) ** (1.0 / num_dims)))
+                # Only stride spatial dimensions (lat, lon) to keep full temporal resolution
+                spatial_dims = [dim for dim in da.dims if dim in ("lat", "lon")]
+                num_spatial = len(spatial_dims)
+                if num_spatial > 0:
+                    stride = int(np.ceil((total_elements / max_points) ** (1.0 / num_spatial)))
                     if stride > 1:
-                        for dim in da.dims:
+                        for dim in spatial_dims:
                             slices[dim] = slice(None, None, stride)
                 if slices:
                     da = da.isel(**slices)

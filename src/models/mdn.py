@@ -88,53 +88,80 @@ def mdn_detect_bimodality_single(
     weight_threshold: float = 0.20,
 ) -> Dict[str, object]:
     """Detect whether a single mixture is bimodal."""
-    # Collect significant modes (components with enough weight)
-    significant: List[Tuple[float, float]] = []
-    for k in range(pi_b.shape[0]):
-        w = float(pi_b[k].item())
-        m = float(mu_b[k, 0].item())
-        if w >= weight_threshold:
-            significant.append((w, m))
+    import numpy as np
 
-    significant.sort(key=lambda x: x[0], reverse=True)  # heaviest first
+    weights = pi_b.detach().cpu().numpy()
+    sigmas = sigma_b[:, 0].detach().cpu().numpy()
+    means = mu_b[:, 0].detach().cpu().numpy()
+
+    # Determine dynamic range: min(mu - 3*sigma) to max(mu + 3*sigma)
+    y_min = float(np.min(means - 3.0 * sigmas))
+    y_max = float(np.max(means + 3.0 * sigmas))
+    
+    # Crop yield cannot be negative
+    y_min = max(0.0, y_min)
+    y_max = max(0.1, y_max)
+
+    grid = np.linspace(y_min, y_max, 200)
+    pdf = np.zeros_like(grid)
+    for w, s, m in zip(weights, sigmas, means):
+        pdf += w * (1.0 / (s * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((grid - m) / s) ** 2)
+
+    # Find local maxima (peaks) of the continuous PDF
+    peaks: List[Tuple[float, float]] = []
+    for i in range(1, len(grid) - 1):
+        if pdf[i] > pdf[i - 1] and pdf[i] > pdf[i + 1]:
+            peaks.append((grid[i], pdf[i]))
+
+    # Sort peaks by density value descending
+    peaks.sort(key=lambda x: x[1], reverse=True)
 
     is_bimodal = False
     valley_depth = 0.0
     expected_val = float((pi_b.unsqueeze(-1) * mu_b).sum().item())
     dominant_mode = expected_val
 
-    if len(significant) >= 2:
-        top_w, top_m = significant[0]
-        sec_w, sec_m = significant[1]
+    # Find unique significant modes by mapping peaks back to closest components
+    significant: List[Tuple[float, float]] = []
+    seen_indices = set()
+    for peak_y, peak_pdf in peaks:
+        closest_idx = int(np.argmin(np.abs(means - peak_y)))
+        if closest_idx not in seen_indices:
+            seen_indices.add(closest_idx)
+            w = float(weights[closest_idx])
+            if w >= weight_threshold:
+                significant.append((w, peak_y))
 
-        # Use mathematically correct pooled sigma for the two dominant components:
-        # pooled_sigma = sqrt((w1 * s1^2 + w2 * s2^2) / (w1 + w2))
-        top_idx = -1
-        sec_idx = -1
-        for k in range(pi_b.shape[0]):
-            m = float(mu_b[k, 0].item())
-            if abs(m - top_m) < 1e-5:
-                top_idx = k
-            elif abs(m - sec_m) < 1e-5:
-                sec_idx = k
-        
-        if top_idx != -1 and sec_idx != -1:
-            top_sigma = float(sigma_b[top_idx, 0].item())
-            sec_sigma = float(sigma_b[sec_idx, 0].item())
-            pooled_sigma = float(
-                math.sqrt((top_w * (top_sigma ** 2) + sec_w * (sec_sigma ** 2)) / (top_w + sec_w + 1e-8)) + 1e-8
-            )
-        else:
-            pooled_sigma = float((pi_b * sigma_b[:, 0]).sum().item() + 1e-8)
+    # Sort the mode list by weight descending to satisfy tests
+    significant.sort(key=lambda x: x[0], reverse=True)
 
-        separation = abs(top_m - sec_m) / pooled_sigma
+    if len(peaks) >= 2:
+        y_top1, p_top1 = peaks[0]
+        y_top2, p_top2 = peaks[1]
 
-        if separation >= separation_threshold:
-            is_bimodal = True
-            # Valley depth: how evenly the mass is split between the two modes
-            # 0 = one mode dominates (shallow valley), 1 = perfectly split
-            valley_depth = float(1.0 - abs(top_w - sec_w) / (top_w + sec_w + 1e-8))
-            dominant_mode = top_m  # heaviest mode, not the valley-mean
+        # Consider the second peak only if it has a significant relative density
+        if p_top2 >= 0.1 * p_top1:
+            # Find the valley (minimum density) between the top two peaks
+            idx_1 = np.argmin(np.abs(grid - y_top1))
+            idx_2 = np.argmin(np.abs(grid - y_top2))
+            start_idx, end_idx = min(idx_1, idx_2), max(idx_1, idx_2)
+            
+            if end_idx > start_idx + 1:
+                valley_idx = start_idx + np.argmin(pdf[start_idx:end_idx + 1])
+                pdf_valley = pdf[valley_idx]
+                
+                # Check if there is a real drop of density (valley) between peaks
+                # density drop threshold: at least 20%
+                if pdf_valley < 0.8 * min(p_top1, p_top2):
+                    # Map the peaks to their closest component weights to compute valley_depth split
+                    closest_idx1 = int(np.argmin(np.abs(means - y_top1)))
+                    closest_idx2 = int(np.argmin(np.abs(means - y_top2)))
+                    top_w = float(weights[closest_idx1])
+                    sec_w = float(weights[closest_idx2])
+                    
+                    is_bimodal = True
+                    valley_depth = float(1.0 - abs(top_w - sec_w) / (top_w + sec_w + 1e-8))
+                    dominant_mode = y_top1
 
     return {
         "is_bimodal": is_bimodal,
