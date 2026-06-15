@@ -98,6 +98,21 @@ class TestMdnDetectBimodality:
                 "Modes not sorted by weight descending"
             )
 
+    def test_separation_threshold_is_respected(self):
+        """Close modes should not be flagged bimodal if they are within separation_threshold."""
+        # Modes are at 3.0 and 7.0 (distance = 4.0, mix_std ~2.02).
+        pi = torch.tensor([[0.48, 0.48, 0.04]], dtype=torch.float32)
+        sigma = torch.tensor([[[0.5], [0.5], [0.1]]], dtype=torch.float32)
+        mu = torch.tensor([[[3.0], [7.0], [5.0]]], dtype=torch.float32)
+
+        # Low separation_threshold (1.0) -> distance (4.0) >= 1.0 * 2.02 -> should detect bimodality
+        report_low = mdn_detect_bimodality(pi, sigma, mu, separation_threshold=1.0)
+        # High separation_threshold (3.0) -> distance (4.0) < 3.0 * 2.02 -> should NOT detect bimodality
+        report_high = mdn_detect_bimodality(pi, sigma, mu, separation_threshold=3.0)
+
+        assert report_low["is_bimodal"] is True
+        assert report_high["is_bimodal"] is False
+
 
 # ── mdn_safe_point_estimate ───────────────────────────────────────────────────
 

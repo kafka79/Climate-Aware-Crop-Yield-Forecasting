@@ -199,18 +199,39 @@ def launch_sagemaker_training(
     sm.create_training_job(**training_job_config)
     logger.success(f"Job submitted → https://console.aws.amazon.com/sagemaker/home#/jobs/{job_name}")
 
-    # ── Poll until terminal state ──────────────────────────────────────────────
+    # ── Poll until terminal state with safety checks ───────────────────────────
     terminal_states = {"Completed", "Failed", "Stopped"}
-    poll_interval   = 60  # seconds
+    poll_interval = 60  # seconds
+    max_polls = max(1, (max_wait_hours * 3600) // poll_interval)
+    polls = 0
+    consecutive_errors = 0
+    max_consecutive_errors = 5
 
-    while True:
-        desc   = sm.describe_training_job(TrainingJobName=job_name)
-        status = desc["TrainingJobStatus"]
-        logger.info(f"[{job_name}] Status: {status}")
+    while polls < max_polls:
+        try:
+            desc = sm.describe_training_job(TrainingJobName=job_name)
+            status = desc["TrainingJobStatus"]
+            logger.info(f"[{job_name}] Status: {status} (Poll {polls + 1}/{max_polls})")
+            consecutive_errors = 0  # reset on success
 
-        if status in terminal_states:
-            break
+            if status in terminal_states:
+                break
+        except Exception as exc:
+            consecutive_errors += 1
+            logger.warning(
+                f"Error describing SageMaker job (error {consecutive_errors}/{max_consecutive_errors}): {exc}"
+            )
+            if consecutive_errors >= max_consecutive_errors:
+                raise RuntimeError(f"Failed to poll SageMaker job after {consecutive_errors} consecutive errors.") from exc
+            # Backoff slightly on error
+            time.sleep(15)
+            continue
+
         time.sleep(poll_interval)
+        polls += 1
+    else:
+        # Exceeded maximum poll time
+        raise TimeoutError(f"SageMaker training job timed out after {max_wait_hours} hours.")
 
     if status != "Completed":
         failure_reason = desc.get("FailureReason", "No reason provided")

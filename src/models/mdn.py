@@ -121,6 +121,11 @@ def mdn_detect_bimodality_single(
     expected_val = float((pi_b.unsqueeze(-1) * mu_b).sum().item())
     dominant_mode = expected_val
 
+    # Calculate standard deviation of the mixture
+    second_moment = float((pi_b.unsqueeze(-1) * (sigma_b.pow(2) + mu_b.pow(2))).sum().item())
+    mix_var = second_moment - expected_val**2
+    mix_std = math.sqrt(max(mix_var, 1e-6))
+
     # Find unique significant modes by mapping peaks back to closest components
     significant: List[Tuple[float, float]] = []
     seen_indices = set()
@@ -153,15 +158,18 @@ def mdn_detect_bimodality_single(
                 # Check if there is a real drop of density (valley) between peaks
                 # density drop threshold: at least 20%
                 if pdf_valley < 0.8 * min(p_top1, p_top2):
-                    # Map the peaks to their closest component weights to compute valley_depth split
-                    closest_idx1 = int(np.argmin(np.abs(means - y_top1)))
-                    closest_idx2 = int(np.argmin(np.abs(means - y_top2)))
-                    top_w = float(weights[closest_idx1])
-                    sec_w = float(weights[closest_idx2])
-                    
-                    is_bimodal = True
-                    valley_depth = float(1.0 - abs(top_w - sec_w) / (top_w + sec_w + 1e-8))
-                    dominant_mode = y_top1
+                    # Validate mode separation in units of mixture standard deviations
+                    distance = abs(y_top1 - y_top2)
+                    if distance >= separation_threshold * mix_std:
+                        # Map the peaks to their closest component weights to compute valley_depth split
+                        closest_idx1 = int(np.argmin(np.abs(means - y_top1)))
+                        closest_idx2 = int(np.argmin(np.abs(means - y_top2)))
+                        top_w = float(weights[closest_idx1])
+                        sec_w = float(weights[closest_idx2])
+                        
+                        is_bimodal = True
+                        valley_depth = float(1.0 - abs(top_w - sec_w) / (top_w + sec_w + 1e-8))
+                        dominant_mode = y_top1
 
     return {
         "is_bimodal": is_bimodal,

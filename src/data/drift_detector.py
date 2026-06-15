@@ -44,10 +44,19 @@ def _psi(reference: np.ndarray, current: np.ndarray, bins: int = 10) -> float:
 
     PSI = Σ (actual% - expected%) * ln(actual% / expected%)
     """
-    # Build bin edges from the reference distribution
-    min_val = min(reference.min(), current.min())
-    max_val = max(reference.max(), current.max())
-    edges = np.linspace(min_val, max_val, bins + 1)
+    # Build bin edges from the reference distribution ONLY to keep baseline static
+    ref_min, ref_max = reference.min(), reference.max()
+    
+    # If the reference has zero variance, np.linspace will produce identical edges. Add a small delta.
+    if ref_min == ref_max:
+        ref_min -= 1e-5
+        ref_max += 1e-5
+        
+    edges = np.linspace(ref_min, ref_max, bins + 1)
+    
+    # Adjust outer edges to capture current data outliers without shifting internal bins
+    edges[0] = min(edges[0], current.min() - 1e-5)
+    edges[-1] = max(edges[-1], current.max() + 1e-5)
 
     ref_counts, _ = np.histogram(reference, bins=edges)
     cur_counts, _ = np.histogram(current, bins=edges)
@@ -95,12 +104,18 @@ def _extract_ndvi(zarr_path: Path, years: Optional[List[int]] = None) -> Optiona
             nir_da = ds["B08"]
             red_da = ds["B04"]
             
+            # Mean-aggregate over spatial dimensions to get regional temporal profile
+            # and avoid spatial autocorrelation inflating the statistical tests.
+            spatial_dims = [dim for dim in nir_da.dims if dim in ("lat", "lon")]
+            if spatial_dims:
+                nir_da = nir_da.mean(dim=spatial_dims)
+                red_da = red_da.mean(dim=spatial_dims)
+            
             # Memory safety: dynamic coordinate striding to prevent OOM
             max_points = 100_000
             total_elements = nir_da.size
             if total_elements > max_points:
                 slices = {}
-                # Only stride spatial dimensions (lat, lon) to keep full temporal resolution
                 spatial_dims = [dim for dim in nir_da.dims if dim in ("lat", "lon")]
                 num_spatial = len(spatial_dims)
                 if num_spatial > 0:
@@ -141,12 +156,17 @@ def _extract_weather_feature(zarr_path: Path, variable: str = "t2m", years: Opti
         if variable in ds:
             da = ds[variable]
             
+            # Mean-aggregate over spatial dimensions to get regional temporal profile
+            # and avoid spatial autocorrelation inflating the statistical tests.
+            spatial_dims = [dim for dim in da.dims if dim in ("lat", "lon")]
+            if spatial_dims:
+                da = da.mean(dim=spatial_dims)
+            
             # Memory safety: dynamic coordinate striding to prevent OOM
             max_points = 100_000
             total_elements = da.size
             if total_elements > max_points:
                 slices = {}
-                # Only stride spatial dimensions (lat, lon) to keep full temporal resolution
                 spatial_dims = [dim for dim in da.dims if dim in ("lat", "lon")]
                 num_spatial = len(spatial_dims)
                 if num_spatial > 0:

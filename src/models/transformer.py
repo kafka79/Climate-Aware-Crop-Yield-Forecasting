@@ -69,6 +69,11 @@ class MultiModalTransformer(nn.Module):
         sensitivity_vals = self.config.get("soil_sensitivity", [1.0] * soil_dim)
         self.register_buffer("soil_sensitivity", torch.tensor(sensitivity_vals, dtype=torch.float32))
 
+        # Learnable gating parameters initialized to 1.0 for backward compatibility
+        self.gate_cross = nn.Parameter(torch.ones(1))
+        self.gate_weather = nn.Parameter(torch.ones(1))
+        self.gate_soil = nn.Parameter(torch.ones(1))
+
         # MDN Output Head instead of simple Linear
         self.mdn_head = MixtureDensityNetwork(
             input_dim=hidden_dim,
@@ -112,9 +117,9 @@ class MultiModalTransformer(nn.Module):
         cross_out, _ = self.cross_attn(sat_q, context_kv, context_kv)  # (T, B, D)
         cross_out = cross_out.permute(1, 0, 2)                # (B, T, D)
 
-        # 6. Sum-based multimodal fusion (preserving temporal alignment)
+        # 6. Gated multimodal fusion (preserving temporal alignment)
         # Broadcast soil_enc (B, 1, D) to (B, T, D) during addition
-        fused = cross_out + weather_enc + soil_enc            # (B, T, D)
+        fused = self.gate_cross * cross_out + self.gate_weather * weather_enc + self.gate_soil * soil_enc  # (B, T, D)
         
         # 7. Transformer self-attention refinement
         fused = fused.permute(1, 0, 2)                        # (T, B, D)

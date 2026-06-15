@@ -2,6 +2,7 @@ import os
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import threading
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,7 @@ from loguru import logger
 class SafeCacheSerializer:
     """
     Secure caching serializer that replaces pickle with standard JSON serialization.
-    Specifically handles PyTorch tensors and Xarray DataArrays.
+    Specifically handles PyTorch tensors and Xarray DataArrays / Datasets.
     """
     @staticmethod
     def serialize(data: dict) -> str:
@@ -25,10 +26,27 @@ class SafeCacheSerializer:
                     "data": v.cpu().numpy().tolist(),
                     "dtype": str(v.dtype).replace("torch.", "")
                 }
+            elif isinstance(v, xr.Dataset):
+                # Optimize: convert Dataset to a lightweight representation to avoid massive json overhead of to_dict()
+                serializable[k] = {
+                    "__type__": "xr.Dataset",
+                    "data": {
+                        "data_vars": {name: var.values.tolist() for name, var in v.data_vars.items()},
+                        "coords": {name: coord.values.tolist() for name, coord in v.coords.items()},
+                        "attrs": v.attrs
+                    }
+                }
             elif isinstance(v, xr.DataArray):
+                # Optimize: convert DataArray to a lightweight representation to avoid massive json overhead of to_dict()
                 serializable[k] = {
                     "__type__": "xr.DataArray",
-                    "data": v.to_dict()
+                    "data": {
+                        "values": v.values.tolist(),
+                        "coords": {name: coord.values.tolist() for name, coord in v.coords.items()},
+                        "dims": list(v.dims),
+                        "name": str(v.name) if v.name else "data",
+                        "attrs": v.attrs
+                    }
                 }
             elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], torch.Tensor):
                 serializable[k] = {
@@ -50,8 +68,22 @@ class SafeCacheSerializer:
                     dtype_map = {"float32": torch.float32, "float64": torch.float64, "int64": torch.int64}
                     dt = dtype_map.get(v["dtype"], torch.float32)
                     deserialized[k] = torch.tensor(v["data"], dtype=dt)
+                elif t == "xr.Dataset":
+                    d = v["data"]
+                    deserialized[k] = xr.Dataset(
+                        data_vars={name: np.array(val) for name, val in d["data_vars"].items()},
+                        coords={name: np.array(val) for name, val in d["coords"].items()},
+                        attrs=d["attrs"]
+                    )
                 elif t == "xr.DataArray":
-                    deserialized[k] = xr.DataArray.from_dict(v["data"])
+                    d = v["data"]
+                    deserialized[k] = xr.DataArray(
+                        np.array(d["values"]),
+                        coords={name: np.array(val) for name, val in d["coords"].items()} if "coords" in d else None,
+                        dims=d["dims"],
+                        name=d["name"],
+                        attrs=d["attrs"]
+                    )
                 elif t == "list[torch.Tensor]":
                     deserialized[k] = [torch.tensor(item, dtype=torch.float32) for item in v["data"]]
             else:
@@ -477,12 +509,26 @@ def build_region_context(
     }
 
 
+_MODEL_CACHE: Dict[str, torch.nn.Module] = {}
+_MODEL_CACHE_LOCK = threading.Lock()
+
+def _get_cached_model(model_path: Path, config: dict) -> torch.nn.Module:
+    path_str = str(model_path.resolve())
+    with _MODEL_CACHE_LOCK:
+        if path_str not in _MODEL_CACHE:
+            model = initialize_model(config)
+            load_model_weights(model, path_str, torch.device("cpu"))
+            model.eval()
+            _MODEL_CACHE[path_str] = model
+        return _MODEL_CACHE[path_str]
+
+
 def run_inference(
     region: str,
     year: int,
     crop: Optional[str] = None,
     config_path: Optional[str] = None,
-) -> Dict[str, Any]:
+ ) -> Dict[str, Any]:
     from src.utils.telemetry import TelemetryTracker, log_business_metric
     
     with TelemetryTracker("run_inference") as tracker:
@@ -499,9 +545,7 @@ def run_inference(
                 "Trained checkpoint not found at models/checkpoints/best_model.pth."
             )
 
-        model = initialize_model(config)
-        load_model_weights(model, str(model_path), torch.device("cpu"))
-        model.eval()
+        model = _get_cached_model(model_path, config)
 
         with torch.no_grad():
             output = model(

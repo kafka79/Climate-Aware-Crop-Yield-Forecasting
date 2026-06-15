@@ -105,13 +105,24 @@ function checkServerConnection() {
     return;
   }
   
-  // Make a light HEAD request to verify the server is responsive
-  fetch(window.location.href, { method: 'HEAD', cache: 'no-store' })
+  // Query Streamlit's native health endpoint
+  fetch(window.location.origin + '/_stcore/health', { method: 'GET', cache: 'no-store' })
     .then(function(response) {
       if (response.ok) {
-        if (banner) banner.style.display = 'none';
-        if (overlay) overlay.style.display = 'none';
-        toggleInputs(false);
+        // Check for Streamlit's native disconnection warning element in the DOM
+        var connectionWarning = document.querySelector('[data-testid="stConnectionStatus"]');
+        var isDisconnected = connectionWarning && (
+          connectionWarning.textContent.includes("Connecting") || 
+          connectionWarning.textContent.includes("Offline")
+        );
+        
+        if (isDisconnected) {
+          showOffline(banner, overlay);
+        } else {
+          if (banner) banner.style.display = 'none';
+          if (overlay) overlay.style.display = 'none';
+          toggleInputs(false);
+        }
       } else {
         showOffline(banner, overlay);
       }
