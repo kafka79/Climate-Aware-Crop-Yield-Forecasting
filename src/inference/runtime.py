@@ -11,11 +11,26 @@ import xarray as xr
 import json
 from loguru import logger
 
+import io
+import base64
+
 class SafeCacheSerializer:
     """
     Secure caching serializer that replaces pickle with standard JSON serialization.
-    Specifically handles PyTorch tensors and Xarray DataArrays / Datasets.
+    Optimized to serialize PyTorch tensors and Xarray coordinates/values using binary
+    numpy arrays encoded in base64, resolving CPU and memory overhead.
     """
+    @staticmethod
+    def _array_to_b64(arr: np.ndarray) -> str:
+        buf = io.BytesIO()
+        np.save(buf, arr)
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+
+    @staticmethod
+    def _b64_to_array(b64_str: str) -> np.ndarray:
+        buf = io.BytesIO(base64.b64decode(b64_str.encode('utf-8')))
+        return np.load(buf)
+
     @staticmethod
     def serialize(data: dict) -> str:
         serializable = {}
@@ -23,26 +38,26 @@ class SafeCacheSerializer:
             if isinstance(v, torch.Tensor):
                 serializable[k] = {
                     "__type__": "torch.Tensor",
-                    "data": v.cpu().numpy().tolist(),
+                    "data": SafeCacheSerializer._array_to_b64(v.cpu().numpy()),
                     "dtype": str(v.dtype).replace("torch.", "")
                 }
             elif isinstance(v, xr.Dataset):
-                # Optimize: convert Dataset to a lightweight representation to avoid massive json overhead of to_dict()
+                # Optimize: serialize arrays to binary numpy to avoid nested list JSON overhead
                 serializable[k] = {
                     "__type__": "xr.Dataset",
                     "data": {
-                        "data_vars": {name: var.values.tolist() for name, var in v.data_vars.items()},
-                        "coords": {name: coord.values.tolist() for name, coord in v.coords.items()},
+                        "data_vars": {name: SafeCacheSerializer._array_to_b64(var.values) for name, var in v.data_vars.items()},
+                        "coords": {name: SafeCacheSerializer._array_to_b64(coord.values) for name, coord in v.coords.items()},
                         "attrs": v.attrs
                     }
                 }
             elif isinstance(v, xr.DataArray):
-                # Optimize: convert DataArray to a lightweight representation to avoid massive json overhead of to_dict()
+                # Optimize: serialize arrays to binary numpy to avoid nested list JSON overhead
                 serializable[k] = {
                     "__type__": "xr.DataArray",
                     "data": {
-                        "values": v.values.tolist(),
-                        "coords": {name: coord.values.tolist() for name, coord in v.coords.items()},
+                        "values": SafeCacheSerializer._array_to_b64(v.values),
+                        "coords": {name: SafeCacheSerializer._array_to_b64(coord.values) for name, coord in v.coords.items()},
                         "dims": list(v.dims),
                         "name": str(v.name) if v.name else "data",
                         "attrs": v.attrs
@@ -51,7 +66,7 @@ class SafeCacheSerializer:
             elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], torch.Tensor):
                 serializable[k] = {
                     "__type__": "list[torch.Tensor]",
-                    "data": [t.cpu().numpy().tolist() for t in v]
+                    "data": [SafeCacheSerializer._array_to_b64(t.cpu().numpy()) for t in v]
                 }
             else:
                 serializable[k] = v
@@ -65,27 +80,28 @@ class SafeCacheSerializer:
             if isinstance(v, dict) and "__type__" in v:
                 t = v["__type__"]
                 if t == "torch.Tensor":
+                    arr = SafeCacheSerializer._b64_to_array(v["data"])
                     dtype_map = {"float32": torch.float32, "float64": torch.float64, "int64": torch.int64}
                     dt = dtype_map.get(v["dtype"], torch.float32)
-                    deserialized[k] = torch.tensor(v["data"], dtype=dt)
+                    deserialized[k] = torch.tensor(arr, dtype=dt)
                 elif t == "xr.Dataset":
                     d = v["data"]
                     deserialized[k] = xr.Dataset(
-                        data_vars={name: np.array(val) for name, val in d["data_vars"].items()},
-                        coords={name: np.array(val) for name, val in d["coords"].items()},
+                        data_vars={name: SafeCacheSerializer._b64_to_array(val) for name, val in d["data_vars"].items()},
+                        coords={name: SafeCacheSerializer._b64_to_array(val) for name, val in d["coords"].items()},
                         attrs=d["attrs"]
                     )
                 elif t == "xr.DataArray":
                     d = v["data"]
                     deserialized[k] = xr.DataArray(
-                        np.array(d["values"]),
-                        coords={name: np.array(val) for name, val in d["coords"].items()} if "coords" in d else None,
+                        SafeCacheSerializer._b64_to_array(d["values"]),
+                        coords={name: SafeCacheSerializer._b64_to_array(val) for name, val in d["coords"].items()} if "coords" in d else None,
                         dims=d["dims"],
                         name=d["name"],
                         attrs=d["attrs"]
                     )
                 elif t == "list[torch.Tensor]":
-                    deserialized[k] = [torch.tensor(item, dtype=torch.float32) for item in v["data"]]
+                    deserialized[k] = [torch.tensor(SafeCacheSerializer._b64_to_array(item), dtype=torch.float32) for item in v["data"]]
             else:
                 deserialized[k] = v
         return deserialized

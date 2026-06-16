@@ -386,6 +386,12 @@ else:
                 fill_opacity=0.9,
                 tooltip=f"{r['site_id']}: {r['yv']:.2f} t/ha"
             ).add_to(fm)
-        st_folium(fm, use_container_width=True, height=400)
+        st_folium(
+            fm,
+            use_container_width=True,
+            height=400,
+            key="regional_overview_map",
+            returned_objects=[]
+        )
     else:
         st.info("Could not populate the map from current configuration.")

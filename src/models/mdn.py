@@ -158,15 +158,22 @@ def mdn_detect_bimodality_single(
                 # Check if there is a real drop of density (valley) between peaks
                 # density drop threshold: at least 20%
                 if pdf_valley < 0.8 * min(p_top1, p_top2):
-                    # Validate mode separation in units of mixture standard deviations
+                    # Map the peaks to their closest component weights to compute valley_depth split
+                    closest_idx1 = int(np.argmin(np.abs(means - y_top1)))
+                    closest_idx2 = int(np.argmin(np.abs(means - y_top2)))
+                    top_w = float(weights[closest_idx1])
+                    sec_w = float(weights[closest_idx2])
+                    
+                    # Calculate pooled component standard deviation
+                    pooled_sigma = math.sqrt((top_w * sigmas[closest_idx1]**2 + sec_w * sigmas[closest_idx2]**2) / (top_w + sec_w + 1e-8))
+                    
+                    # Cap the standard deviation used for thresholding to prevent quadratic variance inflation
+                    # when modes are extremely well-separated.
+                    effective_std = min(mix_std, 4.0 * pooled_sigma)
+                    
+                    # Validate mode separation in units of effective standard deviations
                     distance = abs(y_top1 - y_top2)
-                    if distance >= separation_threshold * mix_std:
-                        # Map the peaks to their closest component weights to compute valley_depth split
-                        closest_idx1 = int(np.argmin(np.abs(means - y_top1)))
-                        closest_idx2 = int(np.argmin(np.abs(means - y_top2)))
-                        top_w = float(weights[closest_idx1])
-                        sec_w = float(weights[closest_idx2])
-                        
+                    if distance >= separation_threshold * effective_std:
                         is_bimodal = True
                         valley_depth = float(1.0 - abs(top_w - sec_w) / (top_w + sec_w + 1e-8))
                         dominant_mode = y_top1

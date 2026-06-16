@@ -325,10 +325,27 @@ class TrainManager:
         }
 
     def _sync_termination_flag(self) -> None:
-        """Synchronize the spot termination request flag across all DDP ranks."""
+        """Synchronize the spot termination request flag across all DDP ranks.
+        Uses asynchronous all_reduce with a timeout check to prevent deadlocks
+        if a rank is killed or unresponsive.
+        """
+        import time
         if torch.distributed.is_initialized():
-            term_tensor = torch.tensor([1.0 if self._termination_requested.is_set() else 0.0], device=self.device)
-            torch.distributed.all_reduce(term_tensor)
-            if term_tensor.item() > 0.0:
-                self._termination_requested.set()
+            try:
+                term_tensor = torch.tensor([1.0 if self._termination_requested.is_set() else 0.0], device=self.device)
+                # Run asynchronous all_reduce
+                work = torch.distributed.all_reduce(term_tensor, async_op=True)
+                # Wait for the reduction to complete with a short check loop (max 2 seconds)
+                # to prevent hanging indefinitely if a rank was hard-terminated.
+                start_time = time.time()
+                while not work.is_completed():
+                    if time.time() - start_time > 2.0:
+                        logger.warning("DDP termination flag sync timed out; proceeding with local signal state.")
+                        return
+                    time.sleep(0.1)
+                
+                if term_tensor.item() > 0.0:
+                    self._termination_requested.set()
+            except Exception as e:
+                logger.warning(f"Error syncing DDP termination flag: {e}")
 
