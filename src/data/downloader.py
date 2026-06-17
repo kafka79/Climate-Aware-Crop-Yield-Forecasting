@@ -157,6 +157,12 @@ class SentinelHubDownloader(DataDownloader):
         try:
             client = SentinelHubDownloadClient(config=self.sh_config)
             data = client.download(request.get_download_list())
+            
+            # Ensure target directory exists and write downloaded TIFF content
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            if data and len(data) > 0:
+                with open(output_path, "wb") as f:
+                    f.write(data[0])
             logger.success(f"SentinelHub download successful for {output_path}")
         except Exception as e:
             logger.error(f"SentinelHub API Request failed: {e}")

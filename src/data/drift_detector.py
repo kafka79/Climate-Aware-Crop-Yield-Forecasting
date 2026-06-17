@@ -14,7 +14,7 @@ import json
 import os
 import sys
 import threading
-from pathlib import Pathwhere
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np

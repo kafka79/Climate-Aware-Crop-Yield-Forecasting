@@ -76,6 +76,45 @@ def _s3_dataset_size_gb(s3_bucket: str, s3_features_prefix: str) -> float:
 
 # ── SageMaker launcher ────────────────────────────────────────────────────────
 
+def _package_and_upload_code(s3_bucket: str, key_prefix: str) -> str:
+    """Tar the local directory (main.py, src/, requirements.txt, configs/) and upload to S3.
+    Returns the S3 URI of the uploaded source tarball.
+    """
+    import tarfile
+    import tempfile
+    import boto3
+    
+    s3 = boto3.client("s3")
+    
+    # Create a temporary file
+    fd, temp_tar_path = tempfile.mkstemp(suffix=".tar.gz")
+    os.close(fd)
+    
+    try:
+        logger.info(f"Packaging source code into tarball: {temp_tar_path}")
+        with tarfile.open(temp_tar_path, "w:gz") as tar:
+            # Add main.py
+            if os.path.exists("main.py"):
+                tar.add("main.py", arcname="main.py")
+            # Add src directory
+            if os.path.exists("src"):
+                tar.add("src", arcname="src")
+            # Add requirements.txt
+            if os.path.exists("requirements.txt"):
+                tar.add("requirements.txt", arcname="requirements.txt")
+            # Add configs directory
+            if os.path.exists("configs"):
+                tar.add("configs", arcname="configs")
+                
+        s3_key = f"{key_prefix}/sourcedir.tar.gz"
+        logger.info(f"Uploading packaged code to s3://{s3_bucket}/{s3_key}")
+        s3.upload_file(temp_tar_path, s3_bucket, s3_key)
+        return f"s3://{s3_bucket}/{s3_key}"
+    finally:
+        if os.path.exists(temp_tar_path):
+            os.remove(temp_tar_path)
+
+
 def launch_sagemaker_training(
     s3_bucket: str,
     s3_features_prefix: str,
@@ -113,6 +152,10 @@ def launch_sagemaker_training(
             "boto3 is required for SageMaker launch. Install with: pip install boto3"
         )
 
+    # Package and upload source code to S3
+    code_prefix = "checkpoints/sagemaker/code"
+    s3_submit_uri = _package_and_upload_code(s3_bucket, code_prefix)
+
     sm = boto3.client("sagemaker")
 
     # Unique job name (SageMaker requires globally unique within the account)
@@ -147,6 +190,7 @@ def launch_sagemaker_training(
         "HyperParameters": {
             "mode": "train",
             "sagemaker_program": "main.py",
+            "sagemaker_submit_directory": s3_submit_uri,
         },
         "InputDataConfig": [
             {

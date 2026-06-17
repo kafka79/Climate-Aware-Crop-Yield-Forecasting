@@ -25,9 +25,10 @@ class MultiModalFuser:
         yield_df: pd.DataFrame,
         sat_ds: xr.Dataset,
         weather_ds: xr.Dataset,
+        chunk_size: int = 1000,
     ) -> Generator[Tuple[np.ndarray, float], None, None]:
         """
-        Yields (X, y) one sequence at a time without loading the full dataset.
+        Yields (X, y) one sequence at a time, loading Zarr data in memory-safe chunks.
 
         Temporal alignment strategy (robust to date mismatches):
         1. Slice everything up-to-and-including the yield date.
@@ -47,57 +48,61 @@ class MultiModalFuser:
             )
             return
 
-        lats = xr.DataArray(yield_df["lat"].values, dims="location")
-        lons = xr.DataArray(yield_df["lon"].values, dims="location")
-        
-        logger.info("Vectorizing spatial lookup for entire batch...")
-        sat_pixels = sat_ds.sel(lat=lats, lon=lons, method="nearest").load()
-        weather_pixels = weather_ds.sel(lat=lats, lon=lons, method="nearest").load()
+        # Process in chunks to balance memory overhead and disk I/O
+        for chunk_start in range(0, len(yield_df), chunk_size):
+            chunk_df = yield_df.iloc[chunk_start : chunk_start + chunk_size]
+            
+            lats = xr.DataArray(chunk_df["lat"].values, dims="location")
+            lons = xr.DataArray(chunk_df["lon"].values, dims="location")
+            
+            logger.info(f"Loading spatial data chunk ({chunk_start} to {chunk_start + len(chunk_df)})...")
+            sat_pixels = sat_ds.sel(lat=lats, lon=lons, method="nearest").load()
+            weather_pixels = weather_ds.sel(lat=lats, lon=lons, method="nearest").load()
 
-        for i, (_, row) in enumerate(yield_df.iterrows()):
-            lat, lon = row["lat"], row["lon"]
-            yield_time = pd.to_datetime(row["time"])
+            for i, (_, row) in enumerate(chunk_df.iterrows()):
+                lat, lon = row["lat"], row["lon"]
+                yield_time = pd.to_datetime(row["time"])
 
-            try:
-                sat_pixel = sat_pixels.isel(location=i)
-                weather_pixel = weather_pixels.isel(location=i)
+                try:
+                    sat_pixel = sat_pixels.isel(location=i)
+                    weather_pixel = weather_pixels.isel(location=i)
 
-                # --- Robust temporal window selection ---
-                # Strategy A: latest window_size steps up to yield_time
-                sat_hist = sat_pixel.sel(time=slice(None, yield_time)).tail(
-                    time=self.window_size
-                )
-                w_hist = weather_pixel.sel(time=slice(None, yield_time)).tail(
-                    time=self.window_size
-                )
-
-                # Strategy B fallback: if yield date is before satellite coverage,
-                # use the very FIRST window_size steps (phenologically closest season)
-                if len(sat_hist.time) < self.window_size:
-                    logger.debug(
-                        f"Yield date {yield_time.date()} is before or near start of "
-                        f"satellite coverage. Using first {self.window_size} steps as fallback."
+                    # --- Robust temporal window selection ---
+                    # Strategy A: latest window_size steps up to yield_time
+                    sat_hist = sat_pixel.sel(time=slice(None, yield_time)).tail(
+                        time=self.window_size
                     )
-                    sat_hist = sat_pixel.isel(time=slice(0, self.window_size))
-                    w_hist = weather_pixel.isel(time=slice(0, self.window_size))
-
-                # Final check — dataset truly too short
-                if len(sat_hist.time) < self.window_size:
-                    logger.warning(
-                        f"Skipping {lat},{lon} @ {yield_time.date()}: "
-                        f"only {len(sat_hist.time)} steps available."
+                    w_hist = weather_pixel.sel(time=slice(None, yield_time)).tail(
+                        time=self.window_size
                     )
-                    continue
 
-                # Trigger compute for this small pixel chunk only
-                sat_data = sat_hist.to_array().values.T      # (T, F_sat)
-                w_data = w_hist.to_array().values.T           # (T, F_weather)
+                    # Strategy B fallback: if yield date is before satellite coverage,
+                    # use the very FIRST window_size steps (phenologically closest season)
+                    if len(sat_hist.time) < self.window_size:
+                        logger.debug(
+                            f"Yield date {yield_time.date()} is before or near start of "
+                            f"satellite coverage. Using first {self.window_size} steps as fallback."
+                        )
+                        sat_hist = sat_pixel.isel(time=slice(0, self.window_size))
+                        w_hist = weather_pixel.isel(time=slice(0, self.window_size))
 
-                X = np.hstack([sat_data, w_data])             # (T, F_total)
-                yield X, float(row["yield"])
+                    # Final check — dataset truly too short
+                    if len(sat_hist.time) < self.window_size:
+                        logger.warning(
+                            f"Skipping {lat},{lon} @ {yield_time.date()}: "
+                            f"only {len(sat_hist.time)} steps available."
+                        )
+                        continue
 
-            except Exception as e:
-                logger.error(f"Failed to fuse {lat},{lon} @ {yield_time}: {e}")
+                    # Trigger compute for this small pixel chunk only
+                    sat_data = sat_hist.to_array().values.T      # (T, F_sat)
+                    w_data = w_hist.to_array().values.T           # (T, F_weather)
+
+                    X = np.hstack([sat_data, w_data])             # (T, F_total)
+                    yield X, float(row["yield"])
+
+                except Exception as e:
+                    logger.error(f"Failed to fuse {lat},{lon} @ {yield_time}: {e}")
 
 
 def prepare_training_sequences(

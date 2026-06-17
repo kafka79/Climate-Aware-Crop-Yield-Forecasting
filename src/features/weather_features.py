@@ -48,15 +48,26 @@ def calculate_spi(precip: pd.Series, scale: int = 3):
         logger.warning("Not enough data to fit Gamma distribution for SPI. Returning z-score.")
         return (precip - precip.mean()) / (precip.std() + 1e-10)
 
-    # 2. Fit Gamma distribution
-    # scipy.stats.gamma.fit returns (a, loc, scale)
-    fit_alpha, fit_loc, fit_beta = stats.gamma.fit(rolling_precip, floc=0)
-    
-    # 3. Calculate Cumulative Probability (CDF)
-    cdf = stats.gamma.cdf(rolling_precip, fit_alpha, loc=fit_loc, scale=fit_beta)
-    
-    # 4. Transform to Standard Normal (Inverse Normal CDF)
-    spi_values = stats.norm.ppf(cdf)
+    # 2. Fit Gamma distribution and calculate CDF
+    try:
+        # scipy.stats.gamma.fit returns (a, loc, scale)
+        fit_alpha, fit_loc, fit_beta = stats.gamma.fit(rolling_precip, floc=0)
+        
+        # 3. Calculate Cumulative Probability (CDF)
+        cdf = stats.gamma.cdf(rolling_precip, fit_alpha, loc=fit_loc, scale=fit_beta)
+        
+        # Clip CDF values to prevent stats.norm.ppf from returning -inf or inf
+        cdf = np.clip(cdf, 1e-6, 1.0 - 1e-6)
+        
+        # 4. Transform to Standard Normal (Inverse Normal CDF)
+        spi_values = stats.norm.ppf(cdf)
+    except Exception as exc:
+        logger.warning(f"Gamma fitting failed ({exc}). Falling back to normalized z-score.")
+        std_val = rolling_precip.std()
+        if pd.isna(std_val) or std_val < 1e-8:
+            spi_values = np.zeros_like(rolling_precip)
+        else:
+            spi_values = (rolling_precip - rolling_precip.mean()) / std_val
     
     # Realign with the original series index
     spi_series = pd.Series(index=precip.index, dtype=float)

@@ -149,6 +149,9 @@ class TrainManager:
 
     # ── Checkpoint helpers ────────────────────────────────────────────────────
 
+    def _is_rank_zero(self) -> bool:
+        return "LOCAL_RANK" not in os.environ or int(os.environ["LOCAL_RANK"]) == 0
+
     def _resume_checkpoint_path(self, save_path: str) -> str:
         return os.path.join(save_path, self.RESUME_CKPT_NAME)
 
@@ -160,6 +163,8 @@ class TrainManager:
         Uses atomic write (tempfile → os.replace) so a kill during the
         write can never leave a half-written, corrupted checkpoint file.
         """
+        if not self._is_rank_zero():
+            return
         # Handle DDP state dict unwrapping
         model_state = self.model.module.state_dict() if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model.state_dict()
         
@@ -289,27 +294,29 @@ class TrainManager:
             # Save best model weights (atomic write)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                best_path = os.path.join(save_path, "best_model.pth")
-                fd, tmp_best = tempfile.mkstemp(
-                    dir=save_path, suffix=".pth.tmp", prefix="best_"
-                )
-                os.close(fd)
-                model_state = self.model.module.state_dict() if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model.state_dict()
-                torch.save(model_state, tmp_best)
-                os.replace(tmp_best, best_path)
-                logger.info(
-                    f"✅ New best model → {best_path} (Val Loss: {val_loss:.4f})"
-                )
+                if self._is_rank_zero():
+                    best_path = os.path.join(save_path, "best_model.pth")
+                    fd, tmp_best = tempfile.mkstemp(
+                        dir=save_path, suffix=".pth.tmp", prefix="best_"
+                    )
+                    os.close(fd)
+                    model_state = self.model.module.state_dict() if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model.state_dict()
+                    torch.save(model_state, tmp_best)
+                    os.replace(tmp_best, best_path)
+                    logger.info(
+                        f"✅ New best model → {best_path} (Val Loss: {val_loss:.4f})"
+                    )
 
             # Always write resumable checkpoint so a runner death wastes ≤ 1 epoch
             self._save_resume_checkpoint(save_path, epoch, best_val_loss)
 
         # Clean up resume checkpoint only on successful completion so next run starts fresh
-        if not self._termination_requested.is_set():
-            resume_path = self._resume_checkpoint_path(save_path)
-            if os.path.exists(resume_path):
-                os.remove(resume_path)
-                logger.info("Training complete — resume checkpoint removed.")
+        if self._is_rank_zero():
+            if not self._termination_requested.is_set():
+                resume_path = self._resume_checkpoint_path(save_path)
+                if os.path.exists(resume_path):
+                    os.remove(resume_path)
+                    logger.info("Training complete — resume checkpoint removed.")
         else:
             logger.warning("Training interrupted by Spot termination. Resumable checkpoint preserved.")
 

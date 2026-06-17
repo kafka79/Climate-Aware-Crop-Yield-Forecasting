@@ -201,3 +201,82 @@ def test_run_inference_gmm_params():
         assert abs(res["gmm_params"]["sigma"][1] - 0.2) < 1e-5
         assert abs(res["gmm_params"]["mu"][0] - 3.0) < 1e-5
 
+
+def test_weather_spi_clipping():
+    from src.features.weather_features import calculate_spi
+    # Zero precip yields CDF=0, which would normally map to -inf
+    precip = pd.Series([0.0] * 12)
+    spi = calculate_spi(precip, scale=3)
+    
+    # Verify no infinite or NaN values are present
+    assert not np.isinf(spi).any()
+    assert not spi.isnull().any()
+    # Check that it clipped at standard normal values
+    assert spi.min() > -5.0
+
+
+def test_fuser_chunked_lazy_loading():
+    from src.data.fusion import MultiModalFuser
+    # Mock datasets
+    times = pd.date_range("2023-01-01", periods=15)
+    sat_ds = xr.Dataset(
+        data_vars={
+            "B04": (("time", "lat", "lon"), np.random.rand(15, 2, 2)),
+            "B08": (("time", "lat", "lon"), np.random.rand(15, 2, 2)),
+        },
+        coords={"time": times, "lat": [23.0, 24.0], "lon": [87.0, 88.0]}
+    )
+    weather_ds = xr.Dataset(
+        data_vars={
+            "t2m": (("time", "lat", "lon"), np.random.rand(15, 2, 2))
+        },
+        coords={"time": times, "lat": [23.0, 24.0], "lon": [87.0, 88.0]}
+    )
+    yield_df = pd.DataFrame([
+        {"lat": 23.0, "lon": 87.0, "time": "2023-12-31", "yield": 4.5},
+        {"lat": 24.0, "lon": 88.0, "time": "2023-12-31", "yield": 5.2}
+    ])
+    
+    config = {
+        "training": {"window_size": 12},
+        "transformer": {"input_dim": 2, "temporal_dim": 1}
+    }
+    
+    fuser = MultiModalFuser(config)
+    sequences = list(fuser.generate_lazy_sequences(yield_df, sat_ds, weather_ds, chunk_size=1))
+    
+    # We chunked with size=1. We should successfully yield 2 sequences without OOM or ValueError
+    assert len(sequences) == 2
+    X, y = sequences[0]
+    assert X.shape == (12, 3)  # window_size=12, features = 2 (sat) + 1 (weather)
+    assert abs(y - 4.5) < 1e-4
+
+
+def test_sentinel_downloader_writes_to_disk(tmp_path):
+    from src.data.downloader import SentinelHubDownloader
+    
+    config = {
+        "sentinel_hub": {
+            "client_id": "test_id",
+            "client_secret": "test_secret"
+        },
+        "paths": {
+            "raw": {
+                "sentinel2": str(tmp_path)
+            }
+        }
+    }
+    
+    downloader = SentinelHubDownloader(config)
+    
+    # Mock client and download return value containing dummy bytes
+    mock_client = MagicMock()
+    mock_client.download.return_value = [b"TIFF_HEADER_AND_BYTES"]
+    
+    with patch("src.data.downloader.SentinelHubDownloadClient", return_value=mock_client):
+        downloader.download([77.0, 28.0, 78.0, 29.0], ("2023-01-01", "2023-01-31"), "test_area")
+        
+    expected_file = tmp_path / "test_area.tiff"
+    assert expected_file.exists()
+    assert expected_file.read_bytes() == b"TIFF_HEADER_AND_BYTES"
+
