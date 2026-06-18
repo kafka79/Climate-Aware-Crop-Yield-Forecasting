@@ -40,6 +40,13 @@ class MultiModalTransformer(nn.Module):
         soil_dim = self.config.get("soil_dim", 3)
         hidden_dim = self.config["hidden_dim"]
 
+        # Spatial pooling for spatial-temporal patch inputs (B, T, C, H, W)
+        self.spatial_cnn = nn.Sequential(
+            nn.Conv2d(self.config["input_dim"], self.config["input_dim"], kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
+
         # Satellite encoder: 1D temporal convolution extracts local temporal
         # patterns across spectral channels (NOT spatial super-resolution).
         self.temporal_conv = nn.Sequential(
@@ -56,8 +63,8 @@ class MultiModalTransformer(nn.Module):
 
         # Transformer Layers (applied to temporal features ONLY)
         encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim,
-                                                  nhead=self.config["num_heads"],
-                                                  dropout=self.config["dropout"])
+                                                   nhead=self.config["num_heads"],
+                                                   dropout=self.config["dropout"])
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer,
                                                          num_layers=self.config["num_layers"])
 
@@ -83,10 +90,17 @@ class MultiModalTransformer(nn.Module):
 
     def forward(self, sat, weather, soil):
         """
-        sat:     (B, T, C)   - Spectral Features
+        sat:     (B, T, C) or (B, T, C, H, W)   - Spectral Features
         weather: (B, T, F_w) - Temporal Features
         soil:    (B, F_s)    - Static Features
         """
+        # If input has spatial dimensions (B, T, C, H, W), run spatial CNN pooling
+        if sat.dim() == 5:
+            B, T, C, H, W = sat.shape
+            sat_flat = sat.view(B * T, C, H, W)
+            sat_spatial = self.spatial_cnn(sat_flat)  # (B * T, C, 1, 1)
+            sat = sat_spatial.view(B, T, C)          # (B, T, C)
+
         # 1. Encode satellite: temporal conv + linear residual path
         sat_t = sat.transpose(1, 2)                          # (B, C, T)
         sat_conv = self.temporal_conv(sat_t).transpose(1, 2)  # (B, T, D)

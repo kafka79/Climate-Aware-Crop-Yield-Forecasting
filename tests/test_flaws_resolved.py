@@ -280,3 +280,130 @@ def test_sentinel_downloader_writes_to_disk(tmp_path):
     assert expected_file.exists()
     assert expected_file.read_bytes() == b"TIFF_HEADER_AND_BYTES"
 
+
+def test_sagemaker_no_wait():
+    import sys
+    mock_boto3 = MagicMock()
+    sys.modules["boto3"] = mock_boto3
+    mock_sm = MagicMock()
+    mock_boto3.client.return_value = mock_sm
+    
+    from src.training.sagemaker_launcher import launch_sagemaker_training
+    with patch("src.training.sagemaker_launcher._package_and_upload_code", return_value="s3://test/code.tar.gz"):
+        res = launch_sagemaker_training(
+            s3_bucket="test-bucket",
+            s3_features_prefix="features",
+            s3_output_prefix="output",
+            role_arn="arn:aws:iam::123456789012:role/service-role/SageMakerRole",
+            no_wait=True
+        )
+        assert res["TrainingJobStatus"] == "InProgress"
+        mock_sm.create_training_job.assert_called_once()
+        mock_sm.describe_training_job.assert_not_called()
+
+
+def test_soil_downloader_fallback_physical_defaults(tmp_path):
+    from src.data.downloader import SoilDownloader
+    config = {
+        "paths": {
+            "raw": {
+                "soil": str(tmp_path)
+            }
+        }
+    }
+    downloader = SoilDownloader(config)
+    with patch("requests.get") as mock_get:
+        mock_get.side_effect = Exception("API Timeout")
+        res = downloader.download([77.0, 28.0, 78.0, 29.0], "test_region")
+        assert res == {"ph": 6.5, "soc": 10.0, "nitrogen": 1.5}
+        
+    expected_file = tmp_path / "test_region_soil.csv"
+    assert expected_file.exists()
+    df = pd.read_csv(expected_file)
+    assert df.loc[0, "ph"] == 6.5
+
+
+def test_safe_cache_serializer_validation():
+    from src.inference.runtime import SafeCacheSerializer
+    import io
+    import base64
+    
+    # 1. Test unplausibly high dimensions (> 5)
+    high_dim_arr = np.zeros((2, 2, 2, 2, 2, 2))
+    b64_str = SafeCacheSerializer._array_to_b64(high_dim_arr)
+    with pytest.raises(ValueError, match="high dimensions"):
+        SafeCacheSerializer._b64_to_array(b64_str)
+        
+    # 2. Test non-numeric types
+    str_arr = np.array(["unsafe", "payload"], dtype=object)
+    buf = io.BytesIO()
+    try:
+        np.save(buf, str_arr, allow_pickle=True)
+        obj_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        with pytest.raises(ValueError):
+            SafeCacheSerializer._b64_to_array(obj_b64)
+    except Exception:
+        pass
+
+
+def test_trainer_sync_termination_flag_timeout():
+    from src.training.trainer import TrainManager
+    import time
+    
+    model = MagicMock()
+    model.parameters.return_value = [torch.nn.Parameter(torch.randn(2, 2))]
+    config = {
+        "training": {
+            "learning_rate": 1e-3,
+            "mode": "deterministic",
+            "device": "cpu"
+        }
+    }
+    
+    # Instantiate trainer without DDP/CUDA triggers
+    trainer = TrainManager(model, config)
+    
+    with patch("torch.distributed.is_initialized", return_value=True):
+        # Mock all_reduce to simulate hanging by sleeping for 10 seconds
+        def mock_all_reduce(tensor):
+            time.sleep(10)
+        
+        with patch("torch.distributed.all_reduce", side_effect=mock_all_reduce):
+            # The function should return within 2 seconds and not hang indefinitely
+            start = time.time()
+            trainer._sync_termination_flag()
+            duration = time.time() - start
+            assert duration < 3.0  # Timeout threshold is 2 seconds
+
+
+def test_transformer_spatial_patch_input():
+    from src.models.transformer import initialize_model
+    config = {
+        "transformer": {
+            "input_dim": 5,
+            "temporal_dim": 3,
+            "soil_dim": 3,
+            "hidden_dim": 64,
+            "num_heads": 2,
+            "num_layers": 1,
+            "dropout": 0.1,
+            "use_jitter": False
+        },
+        "mdn": {
+            "num_mixtures": 3,
+            "output_dim": 1
+        }
+    }
+    model = initialize_model(config)
+    
+    # 5D input tensor: (B, T, C, H, W)
+    # B=2, T=12, C=5, H=3, W=3
+    sat = torch.randn(2, 12, 5, 3, 3)
+    weather = torch.randn(2, 12, 3)
+    soil = torch.randn(2, 3)
+    
+    pi, sigma, mu = model(sat, weather, soil)
+    assert pi.shape == (2, 3)
+    assert sigma.shape == (2, 3, 1)
+    assert mu.shape == (2, 3, 1)
+

@@ -333,24 +333,31 @@ class TrainManager:
 
     def _sync_termination_flag(self) -> None:
         """Synchronize the spot termination request flag across all DDP ranks.
-        Uses asynchronous all_reduce with a timeout check to prevent deadlocks
-        if a rank is killed or unresponsive.
+        Runs the reduction in a background daemon thread with a 2-second timeout
+        join to prevent deadlocking the training process if a rank is unresponsive
+        or killed.
         """
-        import time
+        import threading
         if torch.distributed.is_initialized():
             try:
                 term_tensor = torch.tensor([1.0 if self._termination_requested.is_set() else 0.0], device=self.device)
-                # Run asynchronous all_reduce
-                work = torch.distributed.all_reduce(term_tensor, async_op=True)
-                # Wait for the reduction to complete with a short check loop (max 2 seconds)
-                # to prevent hanging indefinitely if a rank was hard-terminated.
-                start_time = time.time()
-                while not work.is_completed():
-                    if time.time() - start_time > 2.0:
-                        logger.warning("DDP termination flag sync timed out; proceeding with local signal state.")
-                        return
-                    time.sleep(0.1)
                 
+                def _run_reduce():
+                    try:
+                        # Perform blocking reduction inside the thread
+                        torch.distributed.all_reduce(term_tensor)
+                    except Exception as exc:
+                        logger.warning(f"Background DDP reduction failed: {exc}")
+
+                reduce_thread = threading.Thread(target=_run_reduce)
+                reduce_thread.daemon = True
+                reduce_thread.start()
+
+                reduce_thread.join(timeout=2.0)
+                if reduce_thread.is_alive():
+                    logger.warning("DDP termination flag sync timed out; proceeding with local signal state.")
+                    return
+
                 if term_tensor.item() > 0.0:
                     self._termination_requested.set()
             except Exception as e:

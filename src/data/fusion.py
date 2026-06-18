@@ -95,11 +95,31 @@ class MultiModalFuser:
                         continue
 
                     # Trigger compute for this small pixel chunk only
-                    sat_data = sat_hist.to_array().values.T      # (T, F_sat)
-                    w_data = w_hist.to_array().values.T           # (T, F_weather)
-
-                    X = np.hstack([sat_data, w_data])             # (T, F_total)
-                    yield X, float(row["yield"])
+                    if self.config.get("use_spatial_patches", False):
+                        # Locate indices in original sat_ds
+                        lat_idx = int(np.argmin(np.abs(sat_ds.lat.values - lat)))
+                        lon_idx = int(np.argmin(np.abs(sat_ds.lon.values - lon)))
+                        lat_slice = slice(max(0, lat_idx - 1), min(len(sat_ds.lat), lat_idx + 2))
+                        lon_slice = slice(max(0, lon_idx - 1), min(len(sat_ds.lon), lon_idx + 2))
+                        
+                        sat_patch = sat_ds.isel(lat=lat_slice, lon=lon_slice).sel(time=slice(None, yield_time)).tail(time=self.window_size)
+                        if len(sat_patch.time) < self.window_size:
+                            sat_patch = sat_ds.isel(lat=lat_slice, lon=lon_slice).isel(time=slice(0, self.window_size))
+                        
+                        C_dim = self.config.get("transformer", {}).get("input_dim", 5)
+                        sat_data = sat_patch.to_array().values.transpose(1, 0, 2, 3)
+                        if sat_data.shape[2] != 3 or sat_data.shape[3] != 3:
+                            padded = np.zeros((self.window_size, C_dim, 3, 3), dtype=np.float32)
+                            h, w = sat_data.shape[2], sat_data.shape[3]
+                            padded[:, :, :h, :w] = sat_data
+                            sat_data = padded
+                        w_data = w_hist.to_array().values.T
+                        yield (sat_data, w_data), float(row["yield"])
+                    else:
+                        sat_data = sat_hist.to_array().values.T      # (T, F_sat)
+                        w_data = w_hist.to_array().values.T           # (T, F_weather)
+                        X = np.hstack([sat_data, w_data])             # (T, F_total)
+                        yield X, float(row["yield"])
 
                 except Exception as e:
                     logger.error(f"Failed to fuse {lat},{lon} @ {yield_time}: {e}")

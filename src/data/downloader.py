@@ -62,8 +62,29 @@ class SoilDownloader(DataDownloader):
                 elif prop_name == "nitrogen":
                     soil_data["nitrogen"] = mean_val / 100.0 # cg/kg to g/kg
         except Exception as e:
-            logger.error(f"ISRIC API failed: {e}. Falling back to default zeros.")
-            soil_data = {"ph": 0.0, "soc": 0.0, "nitrogen": 0.0}
+            logger.error(f"ISRIC API failed: {e}. Attempting regional median fallback from existing CSV files.")
+            soil_data = None
+            try:
+                from pathlib import Path
+                soil_dir = Path(self.raw_path["soil"])
+                if soil_dir.exists():
+                    frames = []
+                    for file in soil_dir.glob("*_soil.csv"):
+                        if file.name == f"{name}_soil.csv":
+                            continue
+                        df = pd.read_csv(file).select_dtypes(include=[np.number])
+                        if not df.empty and df.to_numpy().flatten().sum() > 0:
+                            frames.append(df.iloc[[0]])
+                    if frames:
+                        combined = pd.concat(frames, ignore_index=True)
+                        median_vals = combined.median().reindex(["ph", "soc", "nitrogen"], fill_value=0.0)
+                        soil_data = median_vals.to_dict()
+            except Exception as inner_e:
+                logger.warning(f"Failed to calculate regional median: {inner_e}")
+                
+            if not soil_data or all(v == 0.0 for v in soil_data.values()):
+                logger.warning("No valid existing soil files found for fallback. Using physical defaults (ph=6.5, soc=10.0, nitrogen=1.5).")
+                soil_data = {"ph": 6.5, "soc": 10.0, "nitrogen": 1.5}
         target_path = os.path.join(self.raw_path["soil"], f"{name}_soil.csv")
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         pd.DataFrame([soil_data]).to_csv(target_path, index=False)

@@ -29,7 +29,14 @@ class SafeCacheSerializer:
     @staticmethod
     def _b64_to_array(b64_str: str) -> np.ndarray:
         buf = io.BytesIO(base64.b64decode(b64_str.encode('utf-8')))
-        return np.load(buf)
+        arr = np.load(buf, allow_pickle=False)
+        if arr.ndim > 5:
+            raise ValueError(f"Security/Memory Limit: Array has unplausibly high dimensions: {arr.ndim}")
+        if arr.nbytes > 100 * 1024 * 1024:  # 100 MB safety ceiling limit
+            raise ValueError(f"Security/Memory Limit: Array size exceeds safety limit: {arr.nbytes} bytes")
+        if not (np.issubdtype(arr.dtype, np.number) or arr.dtype == bool):
+            raise TypeError(f"Security/Type Limit: Non-numeric array type deserialization rejected: {arr.dtype}")
+        return arr
 
     @staticmethod
     def serialize(data: dict) -> str:

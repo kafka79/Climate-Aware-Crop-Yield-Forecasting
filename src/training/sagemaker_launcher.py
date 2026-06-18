@@ -125,6 +125,7 @@ def launch_sagemaker_training(
     use_spot: bool = DEFAULT_SPOT,
     max_wait_hours: int = MAX_WAIT_HOURS,
     job_name_prefix: str = "crop-yield-train",
+    no_wait: bool = False,
 ) -> Dict:
     """Submit a SageMaker training job and block until it finishes.
 
@@ -243,6 +244,15 @@ def launch_sagemaker_training(
     sm.create_training_job(**training_job_config)
     logger.success(f"Job submitted → https://console.aws.amazon.com/sagemaker/home#/jobs/{job_name}")
 
+    if no_wait:
+        logger.info("Skipping polling due to --no-wait configuration.")
+        return {
+            "TrainingJobName": job_name,
+            "TrainingJobStatus": "InProgress",
+            "ResourceConfig": {"InstanceType": instance_type},
+            "OutputDataConfig": {"S3OutputPath": f"s3://{s3_bucket}/{s3_output_prefix}"},
+        }
+
     # ── Poll until terminal state with safety checks ───────────────────────────
     terminal_states = {"Completed", "Failed", "Stopped"}
     poll_interval = 60  # seconds
@@ -307,6 +317,7 @@ def main() -> None:
     parser.add_argument("--instance-type",        default=DEFAULT_INSTANCE_TYPE)
     parser.add_argument("--use-spot",             action="store_true", default=DEFAULT_SPOT)
     parser.add_argument("--max-wait-hours",       type=int, default=MAX_WAIT_HOURS)
+    parser.add_argument("--no-wait",              action="store_true", help="Submit job and exit immediately without polling")
     parser.add_argument("--output",               default="experiments/sagemaker_job.json",
                         help="Where to write the job metadata JSON")
     args = parser.parse_args()
@@ -361,6 +372,7 @@ def main() -> None:
             instance_type=args.instance_type,
             use_spot=args.use_spot,
             max_wait_hours=args.max_wait_hours,
+            no_wait=args.no_wait,
         )
     except RuntimeError as exc:
         logger.error(str(exc))

@@ -85,13 +85,39 @@ class MultiModalCropIterableDataset(IterableDataset):
                     if len(sat_hist.time) < self.window_size:
                         continue
 
-                    sat_data = sat_hist.to_array().values.T
-                    w_data = w_hist.to_array().values.T
-                    X = np.hstack([sat_data, w_data])
+                    if self.config.get("use_spatial_patches", False):
+                        # Extract a 3x3 patch around target lat/lon in self.sat_ds
+                        lat, lon = row["lat"], row["lon"]
+                        lat_idx = int(np.argmin(np.abs(self.sat_ds.lat.values - lat)))
+                        lon_idx = int(np.argmin(np.abs(self.sat_ds.lon.values - lon)))
+                        lat_slice = slice(max(0, lat_idx - 1), min(len(self.sat_ds.lat), lat_idx + 2))
+                        lon_slice = slice(max(0, lon_idx - 1), min(len(self.sat_ds.lon), lon_idx + 2))
+                        
+                        sat_patch = self.sat_ds.isel(lat=lat_slice, lon=lon_slice).sel(time=slice(None, yield_time)).tail(time=self.window_size)
+                        if len(sat_patch.time) < self.window_size:
+                            sat_patch = self.sat_ds.isel(lat=lat_slice, lon=lon_slice).isel(time=slice(0, self.window_size))
+                        
+                        # Shape: (variable, time, lat, lon) -> transpose to (time, variable, lat, lon)
+                        sat_data = sat_patch.to_array().values.transpose(1, 0, 2, 3)
+                        # Pad patch if shape is smaller than 3x3 (near edges)
+                        if sat_data.shape[2] != 3 or sat_data.shape[3] != 3:
+                            padded = np.zeros((self.window_size, self.C, 3, 3), dtype=np.float32)
+                            h, w = sat_data.shape[2], sat_data.shape[3]
+                            padded[:, :, :h, :w] = sat_data
+                            sat_data = padded
+                        sat_tensor = torch.tensor(sat_data, dtype=torch.float32)
+                        w_data = w_hist.to_array().values.T
+                        weather_tensor = torch.tensor(w_data, dtype=torch.float32)
+                    else:
+                        sat_data = sat_hist.to_array().values.T
+                        w_data = w_hist.to_array().values.T
+                        X = np.hstack([sat_data, w_data])
+                        sat_tensor = torch.tensor(X[:, :self.C], dtype=torch.float32)
+                        weather_tensor = torch.tensor(X[:, self.C:], dtype=torch.float32)
                     
                     yield {
-                        "sat": torch.tensor(X[:, :self.C], dtype=torch.float32),
-                        "weather": torch.tensor(X[:, self.C:], dtype=torch.float32),
+                        "sat": sat_tensor,
+                        "weather": weather_tensor,
                         "soil": torch.tensor(chunk_soil[i], dtype=torch.float32),
                         "label": torch.tensor([float(row["yield"])], dtype=torch.float32)
                     }
