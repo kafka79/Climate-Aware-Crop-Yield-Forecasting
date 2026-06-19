@@ -364,16 +364,18 @@ def test_trainer_sync_termination_flag_timeout():
     trainer = TrainManager(model, config)
     
     with patch("torch.distributed.is_initialized", return_value=True):
-        # Mock all_reduce to simulate hanging by sleeping for 10 seconds
-        def mock_all_reduce(tensor):
-            time.sleep(10)
+        # Mock all_reduce to return a mock Work object that is never completed
+        mock_work = MagicMock()
+        mock_work.is_completed.return_value = False
         
-        with patch("torch.distributed.all_reduce", side_effect=mock_all_reduce):
+        with patch("torch.distributed.all_reduce", return_value=mock_work) as mock_reduce:
             # The function should return within 2 seconds and not hang indefinitely
             start = time.time()
             trainer._sync_termination_flag()
             duration = time.time() - start
-            assert duration < 3.0  # Timeout threshold is 2 seconds
+            assert duration >= 2.0  # Timeout threshold is 2 seconds
+            assert duration < 3.0
+            mock_reduce.assert_called_once()
 
 
 def test_transformer_spatial_patch_input():
@@ -406,4 +408,32 @@ def test_transformer_spatial_patch_input():
     assert pi.shape == (2, 3)
     assert sigma.shape == (2, 3, 1)
     assert mu.shape == (2, 3, 1)
+
+
+def test_model_cache_eviction():
+    from src.inference.runtime import _get_cached_model, _MODEL_CACHE
+    from pathlib import Path
+    
+    _MODEL_CACHE.clear()
+    
+    mock_model = MagicMock()
+    with patch("src.inference.runtime.initialize_model", return_value=mock_model), \
+         patch("src.inference.runtime.load_model_weights"):
+             
+        path1 = Path("models/model1.pth")
+        path2 = Path("models/model2.pth")
+        path3 = Path("models/model3.pth")
+        path4 = Path("models/model4.pth")
+        
+        m1 = _get_cached_model(path1, {})
+        m2 = _get_cached_model(path2, {})
+        m3 = _get_cached_model(path3, {})
+        
+        assert len(_MODEL_CACHE) == 3
+        assert str(path1.resolve()) in _MODEL_CACHE
+        
+        m4 = _get_cached_model(path4, {})
+        assert len(_MODEL_CACHE) == 3
+        assert str(path1.resolve()) not in _MODEL_CACHE
+        assert str(path4.resolve()) in _MODEL_CACHE
 

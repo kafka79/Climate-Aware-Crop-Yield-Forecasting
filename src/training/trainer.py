@@ -333,31 +333,23 @@ class TrainManager:
 
     def _sync_termination_flag(self) -> None:
         """Synchronize the spot termination request flag across all DDP ranks.
-        Runs the reduction in a background daemon thread with a 2-second timeout
-        join to prevent deadlocking the training process if a rank is unresponsive
-        or killed.
+        Uses non-blocking asynchronous reduction with a 2-second timeout check
+        to prevent background thread leaks and GIL deadlocks when ranks fail.
         """
-        import threading
+        import time
         if torch.distributed.is_initialized():
             try:
                 term_tensor = torch.tensor([1.0 if self._termination_requested.is_set() else 0.0], device=self.device)
+                work = torch.distributed.all_reduce(term_tensor, async_op=True)
                 
-                def _run_reduce():
-                    try:
-                        # Perform blocking reduction inside the thread
-                        torch.distributed.all_reduce(term_tensor)
-                    except Exception as exc:
-                        logger.warning(f"Background DDP reduction failed: {exc}")
-
-                reduce_thread = threading.Thread(target=_run_reduce)
-                reduce_thread.daemon = True
-                reduce_thread.start()
-
-                reduce_thread.join(timeout=2.0)
-                if reduce_thread.is_alive():
-                    logger.warning("DDP termination flag sync timed out; proceeding with local signal state.")
-                    return
-
+                # Poll the async work handle with a timeout to avoid Python thread leaks
+                start = time.time()
+                while not work.is_completed():
+                    if time.time() - start > 2.0:
+                        logger.warning("DDP termination flag sync timed out; proceeding with local signal state.")
+                        return
+                    time.sleep(0.05)
+                
                 if term_tensor.item() > 0.0:
                     self._termination_requested.set()
             except Exception as e:

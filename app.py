@@ -359,7 +359,18 @@ else:
     if rows:
         mdf = pd.DataFrame(rows)
         ctr = mdf.loc[mdf["site_id"] == region].iloc[0]
-        fm = folium.Map(location=[ctr["lat"], ctr["lon"]], zoom_start=5, tiles="CartoDB positron")
+        
+        # Track region change to reset center/zoom, otherwise preserve client-side zoom/center state
+        if "prev_map_region" not in st.session_state or st.session_state["prev_map_region"] != region:
+            st.session_state["prev_map_region"] = region
+            st.session_state["map_center"] = [ctr["lat"], ctr["lon"]]
+            st.session_state["map_zoom"] = 5
+            
+        fm = folium.Map(
+            location=st.session_state["map_center"],
+            zoom_start=st.session_state["map_zoom"],
+            tiles="CartoDB positron"
+        )
         for _, r in mdf.iterrows():
             sel = r["site_id"] == region
             
@@ -386,12 +397,20 @@ else:
                 fill_opacity=0.9,
                 tooltip=f"{r['site_id']}: {r['yv']:.2f} t/ha"
             ).add_to(fm)
-        st_folium(
+            
+        map_out = st_folium(
             fm,
             use_container_width=True,
             height=400,
             key="regional_overview_map",
-            returned_objects=[]
+            returned_objects=["zoom", "center"]
         )
+        
+        # Save center and zoom state back into session state if panned/zoomed
+        if map_out:
+            if map_out.get("center"):
+                st.session_state["map_center"] = [map_out["center"]["lat"], map_out["center"]["lng"]]
+            if map_out.get("zoom"):
+                st.session_state["map_zoom"] = map_out["zoom"]
     else:
         st.info("Could not populate the map from current configuration.")

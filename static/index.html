@@ -243,29 +243,45 @@
         <h2>Modal Input Parameters</h2>
         
         <form id="inference-form">
-          <label>Spectral Satellites (Sentinel-2)</label>
-          <div class="row">
-            <div class="form-group">
-              <input type="number" id="sat-b02" value="0.12" step="0.01" min="0" max="1" placeholder="B02">
-              <span style="font-size: 0.7rem; color: var(--text-muted)">Blue</span>
-            </div>
-            <div class="form-group">
-              <input type="number" id="sat-b03" value="0.15" step="0.01" min="0" max="1" placeholder="B03">
-              <span style="font-size: 0.7rem; color: var(--text-muted)">Green</span>
-            </div>
-            <div class="form-group">
-              <input type="number" id="sat-b04" value="0.10" step="0.01" min="0" max="1" placeholder="B04">
-              <span style="font-size: 0.7rem; color: var(--text-muted)">Red</span>
-            </div>
-            <div class="form-group">
-              <input type="number" id="sat-b08" value="0.45" step="0.01" min="0" max="1" placeholder="B08">
-              <span style="font-size: 0.7rem; color: var(--text-muted)">NIR</span>
-            </div>
-            <div class="form-group">
-              <input type="number" id="sat-scl" value="0.5" step="0.1" min="0" max="1" placeholder="SCL">
-              <span style="font-size: 0.7rem; color: var(--text-muted)">Veg</span>
-            </div>
+          <div class="form-group" style="margin-bottom: 1.5rem;">
+            <label for="canopy-preset">Crop Canopy Condition (Preset)</label>
+            <select id="canopy-preset">
+              <option value="dense" selected>Dense Green / High Biomass (Healthy Crop)</option>
+              <option value="normal">Normal Green (Average Growth)</option>
+              <option value="pale">Pale/Light Green (Moderate Stress / Nutrient Deficit)</option>
+              <option value="yellow">Yellow/Dry (Severe Water Stress / Drought)</option>
+              <option value="soil">Bare Soil / Brown (Pre-emergence / Harvested)</option>
+              <option value="custom">Custom (Advanced Spectral Settings below)</option>
+            </select>
           </div>
+
+          <details style="margin-bottom: 1.5rem; border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.75rem;">
+            <summary style="font-size: 0.85rem; font-weight: 600; cursor: pointer; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; outline: none;">
+              Advanced Spectral Bands (Sentinel-2)
+            </summary>
+            <div class="row" style="margin-top: 1rem;">
+              <div class="form-group">
+                <input type="number" id="sat-b02" value="0.03" step="0.01" min="0" max="1" placeholder="B02">
+                <span style="font-size: 0.7rem; color: var(--text-muted)">Blue</span>
+              </div>
+              <div class="form-group">
+                <input type="number" id="sat-b03" value="0.08" step="0.01" min="0" max="1" placeholder="B03">
+                <span style="font-size: 0.7rem; color: var(--text-muted)">Green</span>
+              </div>
+              <div class="form-group">
+                <input type="number" id="sat-b04" value="0.02" step="0.01" min="0" max="1" placeholder="B04">
+                <span style="font-size: 0.7rem; color: var(--text-muted)">Red</span>
+              </div>
+              <div class="form-group">
+                <input type="number" id="sat-b08" value="0.75" step="0.01" min="0" max="1" placeholder="B08">
+                <span style="font-size: 0.7rem; color: var(--text-muted)">NIR</span>
+              </div>
+              <div class="form-group">
+                <input type="number" id="sat-scl" value="0.9" step="0.1" min="0" max="1" placeholder="SCL">
+                <span style="font-size: 0.7rem; color: var(--text-muted)">Veg</span>
+              </div>
+            </div>
+          </details>
           
           <label>Weather (Daily Mean ERA5)</label>
           <div class="row">
@@ -570,6 +586,27 @@
       });
     }
     
+    // Preset band mapping
+    const PRESETS = {
+      dense:  { b02: 0.03, b03: 0.08, b04: 0.02, b08: 0.75, scl: 0.9 },
+      normal: { b02: 0.04, b03: 0.09, b04: 0.04, b08: 0.55, scl: 0.7 },
+      pale:   { b02: 0.05, b03: 0.11, b04: 0.08, b08: 0.42, scl: 0.5 },
+      yellow: { b02: 0.06, b03: 0.14, b04: 0.15, b08: 0.28, scl: 0.3 },
+      soil:   { b02: 0.08, b03: 0.12, b04: 0.16, b08: 0.18, scl: 0.1 }
+    };
+
+    document.getElementById("canopy-preset").addEventListener("change", (e) => {
+      const presetVal = e.target.value;
+      if (presetVal && PRESETS[presetVal]) {
+        const p = PRESETS[presetVal];
+        document.getElementById("sat-b02").value = p.b02;
+        document.getElementById("sat-b03").value = p.b03;
+        document.getElementById("sat-b04").value = p.b04;
+        document.getElementById("sat-b08").value = p.b08;
+        document.getElementById("sat-scl").value = p.scl;
+      }
+    });
+
     // Start loader
     window.addEventListener("load", initOnnx);
   </script>

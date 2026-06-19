@@ -181,6 +181,83 @@ def _extract_weather_feature(zarr_path: Path, variable: str = "t2m", years: Opti
     return None
 
 
+def _extract_weather_anomalies(
+    reference_path: Path,
+    current_path: Path,
+    variable: str = "t2m",
+    ref_years: Optional[List[int]] = None,
+    current_year: Optional[int] = None,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Extract weather anomalies (deseasonalized values) from reference and current Zarr stores.
+
+    Computes the long-term climatological mean for each day-of-year using the
+    reference dataset, and subtracts it from both reference and current datasets.
+    This resolves the independent and identically distributed (IID) violation caused
+    by seasonal autocorrelation in raw daily weather parameters.
+    """
+    try:
+        import xarray as xr
+        import pandas as pd
+        
+        ref_ds = xr.open_zarr(reference_path)
+        cur_ds = xr.open_zarr(current_path)
+        
+        # Apply identical spatial striding to prevent OOM
+        max_points = 100_000
+        spatial_dims = [dim for dim in ref_ds.dims if dim in ("lat", "lon")]
+        num_spatial = len(spatial_dims)
+        
+        slices = {}
+        if num_spatial > 0:
+            spatial_shape = [ref_ds.dims[dim] for dim in spatial_dims]
+            total_spatial = np.prod(spatial_shape)
+            if total_spatial > max_points:
+                stride = int(np.ceil((total_spatial / max_points) ** (1.0 / num_spatial)))
+                if stride > 1:
+                    for dim in spatial_dims:
+                        slices[dim] = slice(None, None, stride)
+                        
+        if slices:
+            ref_ds = ref_ds.isel(**slices)
+            cur_ds = cur_ds.isel(**slices)
+            
+        # Slicing time for reference years
+        if ref_years is not None and "time" in ref_ds.coords:
+            ref_times = pd.to_datetime(ref_ds.time.values)
+            ref_indices = np.flatnonzero(np.isin(ref_times.year, ref_years))
+            if len(ref_indices) == 0:
+                logger.warning(f"No reference timestamps found for years {ref_years} in {reference_path}")
+                return None, None
+            ref_ds = ref_ds.isel(time=ref_indices)
+            
+        # Slicing time for current year
+        if current_year is not None and "time" in cur_ds.coords:
+            cur_times = pd.to_datetime(cur_ds.time.values)
+            cur_indices = np.flatnonzero(cur_times.year == current_year)
+            if len(cur_indices) == 0:
+                logger.warning(f"No current timestamps found for year {current_year} in {current_path}")
+                return None, None
+            cur_ds = cur_ds.isel(time=cur_indices)
+            
+        if variable in ref_ds and variable in cur_ds:
+            # 1. Compute daily climatological mean (mean temperature for each day of the year) on reference dataset
+            climatology = ref_ds[variable].groupby("time.dt.dayofyear").mean("time")
+            
+            # 2. Subtract daily climatology from both datasets
+            ref_anom_da = ref_ds[variable].groupby("time.dt.dayofyear") - climatology
+            cur_anom_da = cur_ds[variable].groupby("time.dt.dayofyear") - climatology
+            
+            # 3. Compute and format as numpy arrays
+            ref_anom = ref_anom_da.compute().values.reshape(-1).astype(np.float32)
+            cur_anom = cur_anom_da.compute().values.reshape(-1).astype(np.float32)
+            
+            return ref_anom[np.isfinite(ref_anom)], cur_anom[np.isfinite(cur_anom)]
+            
+    except Exception as exc:
+        logger.warning(f"Could not extract weather anomalies: {exc}")
+    return None, None
+
+
 # ── Core check ───────────────────────────────────────────────────────────────
 
 PSI_WARN_THRESHOLD  = 0.10
@@ -232,8 +309,9 @@ def check_region_drift(
         if not HAS_SCIPY:
             logger.warning(f"[{region}] scipy not available; skipping KS weather test (PSI only).")
         else:
-            ref_w = _extract_weather_feature(reference_weather, "t2m", ref_years)
-            cur_w = _extract_weather_feature(current_weather, "t2m", [current_year])
+            ref_w, cur_w = _extract_weather_anomalies(
+                reference_weather, current_weather, "t2m", ref_years, current_year
+            )
             if ref_w is not None and cur_w is not None and len(ref_w) > 5 and len(cur_w) > 5:
                 try:
                     ks_pval = _ks_pvalue(ref_w, cur_w)

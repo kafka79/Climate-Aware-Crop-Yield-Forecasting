@@ -532,13 +532,22 @@ def build_region_context(
     }
 
 
-_MODEL_CACHE: Dict[str, torch.nn.Module] = {}
+from collections import OrderedDict
+
+_MODEL_CACHE = OrderedDict()
+_MODEL_CACHE_LIMIT = 3
 _MODEL_CACHE_LOCK = threading.Lock()
 
 def _get_cached_model(model_path: Path, config: dict) -> torch.nn.Module:
     path_str = str(model_path.resolve())
     with _MODEL_CACHE_LOCK:
-        if path_str not in _MODEL_CACHE:
+        if path_str in _MODEL_CACHE:
+            _MODEL_CACHE.move_to_end(path_str)
+        else:
+            if len(_MODEL_CACHE) >= _MODEL_CACHE_LIMIT:
+                oldest_key, _ = _MODEL_CACHE.popitem(last=False)
+                logger.info(f"Model cache limit reached. Evicting oldest cached model: {oldest_key}")
+            
             model = initialize_model(config)
             load_model_weights(model, path_str, torch.device("cpu"))
             model.eval()
