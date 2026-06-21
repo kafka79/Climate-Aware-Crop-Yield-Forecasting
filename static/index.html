@@ -15,13 +15,13 @@
     :root {
       --primary: #16a34a;
       --primary-dark: #14532d;
-      --bg: #f9fafb;
-      --card-bg: #ffffff;
+      --bg: #fafafa;
+      --card-bg: rgba(255, 255, 255, 0.85);
       --text: #111827;
       --text-muted: #6b7280;
-      --border: #e5e7eb;
-      --radius: 12px;
-      --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+      --border: rgba(229, 231, 235, 0.8);
+      --radius: 16px;
+      --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02);
     }
     
     * {
@@ -31,58 +31,53 @@
     }
     
     body {
-      font-family: 'Inter', -apple-system, sans-serif;
-      background-color: var(--bg);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: radial-gradient(circle at 10% 20%, rgba(220, 252, 231, 0.3) 0%, rgba(250, 250, 250, 1) 90%);
       color: var(--text);
       line-height: 1.5;
-      padding: 2rem 1rem;
+      padding: 3rem 1.5rem;
       max-width: 1200px;
       margin: 0 auto;
     }
     
     header {
-      margin-bottom: 2rem;
+      margin-bottom: 2.5rem;
       border-bottom: 1px solid var(--border);
       padding-bottom: 1.5rem;
     }
     
     header h1 {
-      font-size: 2.2rem;
+      font-size: 2.25rem;
       font-weight: 700;
       letter-spacing: -0.03em;
       color: var(--text);
       display: flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.75rem;
     }
     
     header p {
       color: var(--text-muted);
-      margin-top: 0.25rem;
+      margin-top: 0.4rem;
+      font-size: 1rem;
     }
     
     .badge {
       display: inline-flex;
       align-items: center;
-      padding: 0.25rem 0.75rem;
+      padding: 0.3rem 0.85rem;
       border-radius: 100px;
-      font-size: 0.75rem;
+      font-size: 0.8rem;
       font-weight: 600;
-      background: #dcfce7;
-      color: #166534;
-      border: 1px solid #bbf7d0;
-    }
-    
-    .badge.offline {
       background: #fef3c7;
       color: #92400e;
-      border-color: #fde68a;
+      border: 1px solid #fde68a;
     }
     
     .grid {
       display: grid;
       grid-template-columns: 1.2fr 1.8fr;
-      gap: 2rem;
+      gap: 2.5rem;
     }
     
     @media (max-width: 900px) {
@@ -93,147 +88,177 @@
     
     .card {
       background-color: var(--card-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-      padding: 1.5rem;
-      margin-bottom: 1.5rem;
+      padding: 2rem;
+      margin-bottom: 2rem;
     }
     
     .card h2 {
-      font-size: 1.25rem;
+      font-size: 1.35rem;
       font-weight: 600;
-      margin-bottom: 1.25rem;
+      margin-bottom: 1.5rem;
       color: var(--text);
       border-left: 4px solid var(--primary);
-      padding-left: 0.5rem;
+      padding-left: 0.75rem;
+      letter-spacing: -0.01em;
     }
     
     .form-group {
-      margin-bottom: 1rem;
+      margin-bottom: 1.25rem;
     }
     
     label {
       display: block;
-      font-size: 0.8rem;
+      font-size: 0.75rem;
       font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.06em;
       color: var(--text-muted);
-      margin-bottom: 0.35rem;
+      margin-bottom: 0.45rem;
     }
     
     input, select {
       width: 100%;
-      padding: 0.75rem;
+      padding: 0.85rem;
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 10px;
       font-family: inherit;
       font-size: 1rem;
-      background-color: #f9fafb;
+      background-color: rgba(249, 250, 251, 0.8);
+      transition: all 0.2s ease-in-out;
     }
     
     input:focus, select:focus {
       outline: none;
       border-color: var(--primary);
       background-color: #fff;
+      box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.08);
     }
     
     .row {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1rem;
+      gap: 1.25rem;
+      margin-bottom: 1.25rem;
     }
     
     button {
       width: 100%;
-      padding: 1rem;
+      padding: 1.1rem;
       background-color: var(--primary);
       color: white;
       border: none;
-      border-radius: 8px;
-      font-size: 1rem;
+      border-radius: 10px;
+      font-size: 1.05rem;
       font-weight: 600;
       cursor: pointer;
-      transition: background 0.2s;
+      box-shadow: 0 4px 6px -1px rgba(22, 163, 74, 0.2);
+      transition: all 0.2s ease-in-out;
     }
     
     button:hover {
       background-color: var(--primary-dark);
+      transform: translateY(-1px);
     }
     
     button:disabled {
-      background-color: var(--border);
+      background-color: #e5e7eb;
+      color: #9ca3af;
       cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
     }
     
     .metrics {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1.5rem;
+      gap: 1.25rem;
+      margin-bottom: 2rem;
     }
     
     .metric-box {
-      background: #f9fafb;
+      background: rgba(249, 250, 251, 0.6);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem;
+      border-radius: 12px;
+      padding: 1.25rem;
       text-align: center;
+      transition: all 0.2s ease-in-out;
+    }
+    
+    .metric-box:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--shadow);
     }
     
     .metric-val {
-      font-size: 1.5rem;
+      font-size: 1.75rem;
       font-weight: 700;
       color: var(--text);
+      letter-spacing: -0.02em;
     }
     
     .metric-label {
-      font-size: 0.7rem;
+      font-size: 0.72rem;
       font-weight: 600;
       text-transform: uppercase;
       color: var(--text-muted);
       letter-spacing: 0.05em;
-      margin-top: 0.25rem;
+      margin-top: 0.35rem;
     }
     
     .alert-box {
       background-color: #fffbeb;
       border-left: 4px solid #f59e0b;
-      padding: 1rem;
-      border-radius: 0 8px 8px 0;
-      font-size: 0.9rem;
+      padding: 1.25rem;
+      border-radius: 0 12px 12px 0;
+      font-size: 0.95rem;
       color: #92400e;
-      margin-bottom: 1.5rem;
+      margin-bottom: 2rem;
+      line-height: 1.6;
       display: none;
+      box-shadow: 0 4px 6px -1px rgba(245, 158, 11, 0.05);
     }
     
     .alert-box.critical {
       background-color: #fef2f2;
       border-left-color: #ef4444;
       color: #991b1b;
+      box-shadow: 0 4px 6px -1px rgba(239, 68, 68, 0.05);
     }
     
     .chart-container {
       position: relative;
-      height: 300px;
+      height: 320px;
       width: 100%;
-      margin-top: 1rem;
+      margin-top: 1.5rem;
     }
     
     #model-status {
-      font-size: 0.85rem;
+      font-size: 0.88rem;
       color: var(--text-muted);
-      margin-top: 0.5rem;
+      margin-top: 0.75rem;
       text-align: center;
+      font-weight: 500;
+    }
+    
+    details summary {
+      outline: none;
+      user-select: none;
+    }
+    
+    details[open] {
+      background: rgba(255, 255, 255, 0.5);
     }
   </style>
 </head>
 <body>
 
   <header>
-    <h1>🌾 Crop Yield Intelligence <span class="badge offline">Edge/Offline Mode</span></h1>
+    <h1>🌾 Crop Yield Intelligence <span class="badge">Edge/Offline Mode</span></h1>
     <p>Perform client-side crop yield forecasting with full distribution diagnostics (GMM) using WebAssembly.</p>
   </header>
   
@@ -243,6 +268,14 @@
         <h2>Modal Input Parameters</h2>
         
         <form id="inference-form">
+          <!-- Real-world Offline Usability Fix: Pre-cached Regional Profile selector -->
+          <div class="form-group" style="margin-bottom: 1.5rem;" id="offline-region-group">
+            <label for="offline-region">Pre-cached Regional Data (Offline Select)</label>
+            <select id="offline-region">
+              <option value="" selected>-- Loading Pre-cached Profiles --</option>
+            </select>
+          </div>
+
           <div class="form-group" style="margin-bottom: 1.5rem;">
             <label for="canopy-preset">Crop Canopy Condition (Preset)</label>
             <select id="canopy-preset">
@@ -255,8 +288,8 @@
             </select>
           </div>
 
-          <details style="margin-bottom: 1.5rem; border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.75rem;">
-            <summary style="font-size: 0.85rem; font-weight: 600; cursor: pointer; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; outline: none;">
+          <details style="margin-bottom: 1.5rem; border: 1px solid var(--border); border-radius: 10px; padding: 0.75rem 1rem; transition: background 0.2s;">
+            <summary style="font-size: 0.8rem; font-weight: 600; cursor: pointer; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">
               Advanced Spectral Bands (Sentinel-2)
             </summary>
             <div class="row" style="margin-top: 1rem;">
@@ -355,6 +388,7 @@
   <script>
     let session = null;
     let chart = null;
+    window.regionalFeatures = null;
     
     // Initialize ONNX Session on page load
     async function initOnnx() {
@@ -362,7 +396,6 @@
       const runBtn = document.getElementById("run-btn");
       try {
         statusDiv.innerText = "Loading WebAssembly tensors...";
-        // Initialize inference session pointing to local exported model
         session = await ort.InferenceSession.create('model.onnx');
         statusDiv.innerText = "ONNX Model loaded successfully.";
         runBtn.removeAttribute("disabled");
@@ -370,6 +403,61 @@
       } catch (err) {
         console.error("ONNX Load error:", err);
         statusDiv.innerHTML = "<span style='color:#dc2626'>⚠️ Error loading ONNX model. Check static/model.onnx is built.</span>";
+      }
+      
+      // Load offline pre-cached regional features
+      await loadRegionalFeatures();
+    }
+    
+    // Real-world Offline Usability Fix: Fetch static JSON profiles cached via Service Worker
+    async function loadRegionalFeatures() {
+      const regionSelect = document.getElementById("offline-region");
+      try {
+        const response = await fetch('/app/static/regional_features.json');
+        if (response.ok) {
+          const data = await response.json();
+          window.regionalFeatures = data;
+          
+          regionSelect.innerHTML = '<option value="" selected>-- Select Cached Regional Profile --</option>';
+          for (const regionName in data) {
+            const opt = document.createElement("option");
+            opt.value = regionName;
+            opt.innerText = `${regionName} (Year ${data[regionName].year})`;
+            regionSelect.appendChild(opt);
+          }
+          
+          regionSelect.addEventListener("change", (e) => {
+            const regName = e.target.value;
+            if (regName && window.regionalFeatures[regName]) {
+              const regData = window.regionalFeatures[regName];
+              
+              // Auto-populate Satellite Bands
+              document.getElementById("sat-b02").value = regData.satellite.b02;
+              document.getElementById("sat-b03").value = regData.satellite.b03;
+              document.getElementById("sat-b04").value = regData.satellite.b04;
+              document.getElementById("sat-b08").value = regData.satellite.b08;
+              document.getElementById("sat-scl").value = regData.satellite.scl;
+              
+              // Auto-populate Weather Parameters
+              document.getElementById("w-tmax").value = regData.weather.tmax;
+              document.getElementById("w-tmin").value = regData.weather.tmin;
+              document.getElementById("w-precip").value = regData.weather.precip;
+              
+              // Auto-populate Soil Parameters
+              document.getElementById("soil-ph").value = regData.soil.ph;
+              document.getElementById("soil-soc").value = regData.soil.soc;
+              document.getElementById("soil-nit").value = regData.soil.nitrogen;
+              
+              // Toggle preset dropdown to custom since specific regional data has been loaded
+              document.getElementById("canopy-preset").value = "custom";
+            }
+          });
+        } else {
+          regionSelect.innerHTML = '<option value="" selected>-- No Pre-cached Profiles Found --</option>';
+        }
+      } catch (err) {
+        console.warn("Failed to load offline regional features profiles:", err);
+        regionSelect.innerHTML = '<option value="" selected>-- Profiles Unavailable Offline --</option>';
       }
     }
     
@@ -388,7 +476,6 @@
       return pdf;
     }
     
-    // Normal math functions in JS
     function getWeightedMean(pi, mu) {
       let sum = 0;
       for (let i = 0; i < pi.length; i++) {
@@ -411,7 +498,6 @@
       e.preventDefault();
       if (!session) return;
       
-      // Collect Inputs
       const satVal = [
         parseFloat(document.getElementById("sat-b02").value),
         parseFloat(document.getElementById("sat-b03").value),
@@ -430,8 +516,6 @@
         parseFloat(document.getElementById("soil-nit").value)
       ];
       
-      // Build Inputs: Tensors expect Batch=1, Timesteps=12, Features
-      // For standalone demo client, we repeat inputs over sequence length of 12
       const T = 12;
       const satFlattened = new Float32Array(T * 5);
       const weatherFlattened = new Float32Array(T * 3);
@@ -449,7 +533,6 @@
         const feeds = { satellite: satTensor, weather: weatherTensor, soil: soilTensor };
         const results = await session.run(feeds);
         
-        // Extract GMM Parameters from the named outputs (pi, sigma, mu)
         const piTensor = results.pi;
         const sigmaTensor = results.sigma;
         const muTensor = results.mu;
@@ -462,14 +545,10 @@
         let sigmaData = Array.from(sigmaTensor.data);
         let muData = Array.from(muTensor.data);
         
-        // GMM has 5 mixtures (config). Reshape to component lists
         const numMixtures = piData.length;
-        
-        // Calculate expected value and std
         const mean = getWeightedMean(piData, muData);
         const std = getWeightedStd(piData, sigmaData, muData, mean);
         
-        // Detect Bimodality in JS
         const weightThreshold = 0.20;
         const separationThreshold = 1.5;
         let significant = [];
@@ -478,7 +557,7 @@
             significant.push({ w: piData[k], m: muData[k], s: sigmaData[k] });
           }
         }
-        significant.sort((a, b) => b.w - a.w); // heaviest first
+        significant.sort((a, b) => b.w - a.w);
         
         let isBimodal = false;
         let finalYield = mean;
@@ -515,11 +594,9 @@
           }
         }
         
-        // Display metrics
         document.getElementById("predicted-yield").innerText = `${finalYield.toFixed(2)}`;
         document.getElementById("uncertainty-level").innerText = `${std.toFixed(2)}`;
         
-        // Plot GMM PDF Curve
         plotGmmPdf(piData, sigmaData, muData, finalYield);
         
       } catch (err) {
@@ -528,19 +605,17 @@
       }
     });
     
-    // Render GMM Density Curve using Chart.js
+    // Render GMM Density Curve using Chart.js styled to match Apple/Streamlit specs
     function plotGmmPdf(pi, sigma, mu, pointEstimate) {
       const yields = [];
       const densities = [];
       
-      // Grid of yield points from 0 to 12 t/ha in steps of 0.1
       for (let y = 0.0; y <= 12.0; y += 0.1) {
         yields.push(parseFloat(y.toFixed(1)));
         densities.push(gmmPdf(y, pi, sigma, mu));
       }
       
       const ctx = document.getElementById('pdf-chart').getContext('2d');
-      
       if (chart) {
         chart.destroy();
       }
@@ -553,9 +628,10 @@
             label: 'Probability Density (PDF)',
             data: densities,
             borderColor: '#16a34a',
-            backgroundColor: 'rgba(22, 163, 74, 0.1)',
+            backgroundColor: 'rgba(22, 163, 74, 0.06)',
             fill: true,
             tension: 0.4,
+            borderWidth: 2.5,
             pointRadius: 0
           }]
         },
@@ -564,29 +640,45 @@
           maintainAspectRatio: false,
           scales: {
             x: {
+              grid: { display: false },
               title: {
                 display: true,
-                text: 'Yield (t/ha)'
-              }
+                text: 'Yield (t/ha)',
+                font: { family: 'Inter', size: 11, weight: '600' }
+              },
+              ticks: { font: { family: 'Inter', size: 10 } }
             },
             y: {
               beginAtZero: true,
+              grid: { color: 'rgba(229, 231, 235, 0.4)' },
               title: {
                 display: true,
-                text: 'Density'
-              }
+                text: 'Density',
+                font: { family: 'Inter', size: 11, weight: '600' }
+              },
+              ticks: { font: { family: 'Inter', size: 10 } }
             }
           },
           plugins: {
-            legend: {
-              display: false
+            legend: { display: false },
+            tooltip: {
+              enabled: true,
+              backgroundColor: '#1f2937',
+              titleFont: { family: 'Inter', size: 12, weight: '600' },
+              bodyFont: { family: 'Inter', size: 11 },
+              padding: 10,
+              cornerRadius: 8,
+              callbacks: {
+                label: function(context) {
+                  return `Density: ${context.parsed.y.toFixed(4)}`;
+                }
+              }
             }
           }
         }
       });
     }
     
-    // Preset band mapping
     const PRESETS = {
       dense:  { b02: 0.03, b03: 0.08, b04: 0.02, b08: 0.75, scl: 0.9 },
       normal: { b02: 0.04, b03: 0.09, b04: 0.04, b08: 0.55, scl: 0.7 },
@@ -607,7 +699,6 @@
       }
     });
 
-    // Start loader
     window.addEventListener("load", initOnnx);
   </script>
 </body>

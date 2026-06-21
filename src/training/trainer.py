@@ -2,6 +2,7 @@ import os
 import signal
 import tempfile
 import threading
+import queue
 
 import torch
 import torch.optim as optim
@@ -62,10 +63,14 @@ class TrainManager:
         # the handler sets this flag so the training loop can save state
         # before the container is killed.
         self._termination_requested = threading.Event()
-        self._active_upload_thread: Optional[threading.Thread] = None
         self._save_path: Optional[str] = None
         self._current_epoch: int = 0
         self._register_spot_termination_handler()
+
+        # Background uploader queue for non-blocking S3 sync to prevent DDP node blocking
+        self._upload_queue = queue.Queue()
+        self._uploader_thread = None
+        self._start_uploader_worker()
 
     # ── Spot termination handler ──────────────────────────────────────────────
 
@@ -95,6 +100,41 @@ class TrainManager:
             # signal.signal can only be called from the main thread;
             # in worker threads we skip registration silently.
             pass
+
+    def _start_uploader_worker(self) -> None:
+        """Start a background daemon thread that processes S3 upload requests sequentially.
+        This completely decouples checkpoints uploads from the training loop, preventing DDP stalls.
+        """
+        s3_bucket = self.config.get("s3_bucket")
+        if not s3_bucket or not self._is_rank_zero():
+            return
+
+        def uploader_loop():
+            try:
+                import boto3
+                s3 = boto3.client('s3')
+            except Exception as e:
+                logger.error(f"Failed to initialize boto3 client in uploader loop: {e}")
+                return
+
+            while True:
+                task = self._upload_queue.get()
+                if task is None:  # Sentinel value to terminate thread
+                    self._upload_queue.task_done()
+                    break
+                
+                local_path, bucket, key = task
+                try:
+                    logger.debug(f"Uploading checkpoint in background: {key}...")
+                    s3.upload_file(local_path, bucket, key)
+                    logger.debug(f"Resume checkpoint synced to s3://{bucket}/{key}")
+                except Exception as e:
+                    logger.warning(f"Failed to sync checkpoint to S3: {e}")
+                finally:
+                    self._upload_queue.task_done()
+
+        self._uploader_thread = threading.Thread(target=uploader_loop, daemon=True)
+        self._uploader_thread.start()
 
     # ── Training / Validation loops ───────────────────────────────────────────
 
@@ -193,30 +233,12 @@ class TrainManager:
                 os.remove(tmp_path)
             raise
             
-        # Push to S3 if configured (Task 3: S3 Sync) - Asynchronously in background with ordering safety
+        # Push to S3 if configured (Task 3: S3 Sync) - Non-blocking background uploader queue
         s3_bucket = self.config.get("s3_bucket")
-        if s3_bucket and ("LOCAL_RANK" not in os.environ or int(os.environ["LOCAL_RANK"]) == 0):
-            # Join previous upload thread if it is still running to ensure sequential consistency
-            if self._active_upload_thread is not None and self._active_upload_thread.is_alive():
-                logger.debug("Waiting for previous checkpoint S3 upload to complete...")
-                self._active_upload_thread.join(timeout=30)
-
-            def upload_worker(file_path, bucket, key):
-                try:
-                    import boto3
-                    s3 = boto3.client('s3')
-                    s3.upload_file(file_path, bucket, key)
-                    logger.debug(f"Resume checkpoint synced to s3://{bucket}/{key}")
-                except Exception as e:
-                    logger.warning(f"Failed to sync checkpoint to S3: {e}")
-
+        if s3_bucket and self._is_rank_zero():
             s3_key = f"{self.full_config.get('project_name', 'crop_yield')}/{self.RESUME_CKPT_NAME}"
-            self._active_upload_thread = threading.Thread(
-                target=upload_worker,
-                args=(final_path, s3_bucket, s3_key),
-                daemon=False  # Wait for upload completion on process exit
-            )
-            self._active_upload_thread.start()
+            self._upload_queue.put((final_path, s3_bucket, s3_key))
+            logger.debug(f"Queued checkpoint for background S3 upload: {s3_key}")
 
     def _load_resume_checkpoint(self, save_path: str) -> Optional[int]:
         """If a resume checkpoint exists, restore all state and return start epoch."""
@@ -320,10 +342,11 @@ class TrainManager:
         else:
             logger.warning("Training interrupted by Spot termination. Resumable checkpoint preserved.")
 
-        # Join any active upload thread to ensure final synchronization completes before exit
-        if self._active_upload_thread is not None and self._active_upload_thread.is_alive():
-            logger.info("Waiting for active S3 checkpoint upload thread to complete...")
-            self._active_upload_thread.join()
+        # Wait for uploader queue to complete on successful training
+        if self._is_rank_zero() and self._uploader_thread is not None:
+            logger.info("Waiting for background S3 checkpoint uploads to finish...")
+            self._upload_queue.put(None)  # Termination sentinel
+            self._uploader_thread.join(timeout=30)
 
         logger.success("Training run complete.")
         return {
@@ -338,6 +361,7 @@ class TrainManager:
         """
         import time
         if torch.distributed.is_initialized():
+            timed_out = False
             try:
                 term_tensor = torch.tensor([1.0 if self._termination_requested.is_set() else 0.0], device=self.device)
                 work = torch.distributed.all_reduce(term_tensor, async_op=True)
@@ -346,12 +370,18 @@ class TrainManager:
                 start = time.time()
                 while not work.is_completed():
                     if time.time() - start > 2.0:
-                        logger.warning("DDP termination flag sync timed out; proceeding with local signal state.")
-                        return
+                        timed_out = True
+                        break
                     time.sleep(0.05)
                 
-                if term_tensor.item() > 0.0:
+                if not timed_out and term_tensor.item() > 0.0:
                     self._termination_requested.set()
             except Exception as e:
                 logger.warning(f"Error syncing DDP termination flag: {e}")
+
+            if timed_out:
+                raise RuntimeError(
+                    "DDP termination flag sync timed out. Potential DDP worker rank failure detected. "
+                    "Aborting training to prevent out-of-sync parameter updates and silent divergence."
+                )
 

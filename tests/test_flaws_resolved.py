@@ -369,9 +369,10 @@ def test_trainer_sync_termination_flag_timeout():
         mock_work.is_completed.return_value = False
         
         with patch("torch.distributed.all_reduce", return_value=mock_work) as mock_reduce:
-            # The function should return within 2 seconds and not hang indefinitely
+            # The function should raise RuntimeError within 2 seconds and not hang indefinitely
             start = time.time()
-            trainer._sync_termination_flag()
+            with pytest.raises(RuntimeError, match="DDP termination flag sync timed out"):
+                trainer._sync_termination_flag()
             duration = time.time() - start
             assert duration >= 2.0  # Timeout threshold is 2 seconds
             assert duration < 3.0

@@ -247,6 +247,12 @@ def _extract_weather_anomalies(
             ref_anom_da = ref_ds[variable].groupby("time.dt.dayofyear") - climatology
             cur_anom_da = cur_ds[variable].groupby("time.dt.dayofyear") - climatology
             
+            # Resample along time dimension to weekly mean to resolve temporal autocorrelation (satisfying IID K-S assumptions)
+            if "time" in ref_anom_da.coords:
+                ref_anom_da = ref_anom_da.resample(time="1W").mean()
+            if "time" in cur_anom_da.coords:
+                cur_anom_da = cur_anom_da.resample(time="1W").mean()
+            
             # 3. Compute and format as numpy arrays
             ref_anom = ref_anom_da.compute().values.reshape(-1).astype(np.float32)
             cur_anom = cur_anom_da.compute().values.reshape(-1).astype(np.float32)

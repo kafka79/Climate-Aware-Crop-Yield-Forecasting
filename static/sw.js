@@ -24,6 +24,7 @@ const PRECACHE_URLS = [
   "/app/static/index.html",
   "/app/static/manifest.json",
   "/app/static/model.onnx",
+  "/app/static/regional_features.json",
   "/app/static/icons/icon-192.png",
   "/app/static/icons/icon-512.png",
   "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",

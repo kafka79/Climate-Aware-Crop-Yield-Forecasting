@@ -24,6 +24,60 @@ YIELD_HISTORY = load_yield_history(CONFIG)
 if "live_results" not in st.session_state:
     st.session_state["live_results"] = {}
 
+def generate_offline_features_json():
+    import json
+    from pathlib import Path
+    from src.inference.runtime import _prepare_model_inputs
+    
+    features_data = {}
+    for r in REGIONS:
+        try:
+            ctx = build_region_context(r, 2023, CONFIG)
+            f_years = ctx.get("feature_years", [])
+            if f_years:
+                latest_year = max(f_years)
+                inputs = _prepare_model_inputs(CONFIG, r, latest_year)
+                
+                # sat_tensor is shape (1, 12, 5) -> [B, T, C]
+                # weather_tensor is shape (1, 12, 3)
+                # soil_tensor is shape (1, 3)
+                sat_last = inputs["sat_tensor"][0, -1].tolist()
+                weather_last = inputs["weather_tensor"][0, -1].tolist()
+                soil_vec = inputs["soil_tensor"][0].tolist()
+                
+                features_data[r] = {
+                    "year": latest_year,
+                    "satellite": {
+                        "b02": sat_last[0],
+                        "b03": sat_last[1],
+                        "b04": sat_last[2],
+                        "b08": sat_last[3],
+                        "scl": sat_last[4] if len(sat_last) > 4 else 0.9
+                    },
+                    "weather": {
+                        "tmax": weather_last[0],
+                        "tmin": weather_last[1],
+                        "precip": weather_last[2]
+                    },
+                    "soil": {
+                        "ph": soil_vec[0],
+                        "soc": soil_vec[1],
+                        "nitrogen": soil_vec[2]
+                    }
+                }
+        except Exception:
+            continue
+            
+    out_path = Path("static/regional_features.json")
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(features_data, f, indent=2)
+    except Exception:
+        pass
+
+generate_offline_features_json()
+
 # ── Apple-grade Design System ────────────────────────────────────────────────
 # White canvas, Inter font, high-contrast for outdoor screens, zero noise.
 st.markdown("""

@@ -689,6 +689,20 @@ def run_inference(
             "risk": risk
         })
 
+        # Closed-loop production telemetry: calculate forecast accuracy against actual observed yields when available
+        if observed_yield is not None and observed_yield > 0:
+            absolute_error = abs(predicted_yield - observed_yield)
+            mape = (absolute_error / observed_yield) * 100.0
+            log_business_metric("forecast_absolute_error", absolute_error, "t/ha", {
+                "region": region,
+                "year": str(year)
+            })
+            log_business_metric("forecast_mape", mape, "percent", {
+                "region": region,
+                "year": str(year)
+            })
+            logger.info(f"Closed-loop telemetry: calculated MAPE={mape:.2f}%, Absolute Error={absolute_error:.2f} t/ha for {region}:{year}")
+
         return {
             "region": region,
             "year": year,
