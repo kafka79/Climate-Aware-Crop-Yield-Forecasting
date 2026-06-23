@@ -34,7 +34,7 @@ class SafeCacheSerializer:
             raise ValueError(f"Security/Memory Limit: Array has unplausibly high dimensions: {arr.ndim}")
         if arr.nbytes > 100 * 1024 * 1024:  # 100 MB safety ceiling limit
             raise ValueError(f"Security/Memory Limit: Array size exceeds safety limit: {arr.nbytes} bytes")
-        if not (np.issubdtype(arr.dtype, np.number) or arr.dtype == bool):
+        if not (np.issubdtype(arr.dtype, np.number) or arr.dtype == bool or np.issubdtype(arr.dtype, np.datetime64)):
             raise TypeError(f"Security/Type Limit: Non-numeric array type deserialization rejected: {arr.dtype}")
         return arr
 
@@ -53,8 +53,20 @@ class SafeCacheSerializer:
                 serializable[k] = {
                     "__type__": "xr.Dataset",
                     "data": {
-                        "data_vars": {name: SafeCacheSerializer._array_to_b64(var.values) for name, var in v.data_vars.items()},
-                        "coords": {name: SafeCacheSerializer._array_to_b64(coord.values) for name, coord in v.coords.items()},
+                        "data_vars": {
+                            name: {
+                                "values": SafeCacheSerializer._array_to_b64(var.values),
+                                "dims": list(var.dims)
+                            }
+                            for name, var in v.data_vars.items()
+                        },
+                        "coords": {
+                            name: {
+                                "values": SafeCacheSerializer._array_to_b64(coord.values),
+                                "dims": list(coord.dims)
+                            }
+                            for name, coord in v.coords.items()
+                        },
                         "attrs": v.attrs
                     }
                 }
@@ -93,9 +105,23 @@ class SafeCacheSerializer:
                     deserialized[k] = torch.tensor(arr, dtype=dt)
                 elif t == "xr.Dataset":
                     d = v["data"]
+                    data_vars = {}
+                    for name, val in d["data_vars"].items():
+                        if isinstance(val, dict) and "values" in val and "dims" in val:
+                            data_vars[name] = (val["dims"], SafeCacheSerializer._b64_to_array(val["values"]))
+                        else:
+                            data_vars[name] = SafeCacheSerializer._b64_to_array(val)
+                            
+                    coords = {}
+                    for name, val in d["coords"].items():
+                        if isinstance(val, dict) and "values" in val and "dims" in val:
+                            coords[name] = (val["dims"], SafeCacheSerializer._b64_to_array(val["values"]))
+                        else:
+                            coords[name] = SafeCacheSerializer._b64_to_array(val)
+                            
                     deserialized[k] = xr.Dataset(
-                        data_vars={name: SafeCacheSerializer._b64_to_array(val) for name, val in d["data_vars"].items()},
-                        coords={name: SafeCacheSerializer._b64_to_array(val) for name, val in d["coords"].items()},
+                        data_vars=data_vars,
+                        coords=coords,
                         attrs=d["attrs"]
                     )
                 elif t == "xr.DataArray":
@@ -549,7 +575,9 @@ def _get_cached_model(model_path: Path, config: dict) -> torch.nn.Module:
                 logger.info(f"Model cache limit reached. Evicting oldest cached model: {oldest_key}")
             
             model = initialize_model(config)
-            load_model_weights(model, path_str, torch.device("cpu"))
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            load_model_weights(model, path_str, device)
+            model.to(device)
             model.eval()
             _MODEL_CACHE[path_str] = model
         return _MODEL_CACHE[path_str]
@@ -578,11 +606,20 @@ def run_inference(
             )
 
         model = _get_cached_model(model_path, config)
+        try:
+            device = next(iter(model.parameters())).device
+            if hasattr(device, "_mock_return_value") or not isinstance(device, (torch.device, str)):
+                device = torch.device("cpu")
+        except StopIteration:
+            device = torch.device("cpu")
+
+        # Move tensors to the model's device
+        sat_tensor = prepared["sat_tensor"].to(device)
+        weather_tensor = prepared["weather_tensor"].to(device)
+        soil_tensor = prepared["soil_tensor"].to(device)
 
         with torch.no_grad():
-            output = model(
-                prepared["sat_tensor"], prepared["weather_tensor"], prepared["soil_tensor"]
-            )
+            output = model(sat_tensor, weather_tensor, soil_tensor)
 
         if isinstance(output, tuple):
             pi, sigma, mu = output

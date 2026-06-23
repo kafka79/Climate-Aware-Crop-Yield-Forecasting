@@ -87,7 +87,7 @@ class RecommendationEngine:
             advice.append("📈 **Surplus Opportunity:** Yield is above average. Secure storage and transport logistics early to avoid post-harvest losses.")
 
         # 3. Uncertainty Logic
-        range_pct = (result["upper_bound"] - result["lower_bound"]) / result["predicted_yield"]
+        range_pct = (result["upper_bound"] - result["lower_bound"]) / (result["predicted_yield"] + 1e-8)
         if range_pct > 0.4:
             advice.append("⚠️ **Data Volatility:** High variance in the forecast. This usually indicates conflicting signals between satellite imagery and weather data. Re-verify the forecast in 7 days.")
 

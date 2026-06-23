@@ -25,10 +25,10 @@ import requests
 # Conditional import for scipy to handle packaging gracefully at top level
 HAS_SCIPY = False
 try:
-    from scipy.stats import ks_2samp
+    from scipy.stats import ks_2samp, levene
     HAS_SCIPY = True
 except ImportError:
-    logger.warning("Scipy is not installed. Kolmogorov-Smirnov weather drift checks will be skipped.")
+    logger.warning("Scipy is not installed. Kolmogorov-Smirnov and Levene weather drift checks will be skipped.")
 
 # Background thread tracker for non-blocking alerts
 _ALERT_THREAD: Optional[threading.Thread] = None
@@ -308,12 +308,13 @@ def check_region_drift(
         report["ndvi_status"] = "SKIP"
         logger.warning(f"[{region}] NDVI data insufficient for PSI — skipping.")
 
-    # ── KS on weather ──
+    # ── Weather Drift Test (KS on mean & Levene on variance) ──
     ks_pval = None
+    levene_pval = None
     ks_status = "SKIP"
     if reference_weather and current_weather:
         if not HAS_SCIPY:
-            logger.warning(f"[{region}] scipy not available; skipping KS weather test (PSI only).")
+            logger.warning(f"[{region}] scipy not available; skipping KS/Levene weather tests (PSI only).")
         else:
             ref_w, cur_w = _extract_weather_anomalies(
                 reference_weather, current_weather, "t2m", ref_years, current_year
@@ -328,16 +329,31 @@ def check_region_drift(
                     pooled_std = np.sqrt((std_ref**2 + std_cur**2) / 2.0) + 1e-8
                     cohens_d = abs(mean_cur - mean_ref) / pooled_std
                     
+                    # Compute Levene's test for variance shift
+                    _, l_pval = levene(ref_w, cur_w, center="median")
+                    levene_pval = float(l_pval)
+                    
+                    # Compute variance ratio for practical significance
+                    var_ref = float(std_ref**2) + 1e-8
+                    var_cur = float(std_cur**2) + 1e-8
+                    var_ratio = max(var_ref, var_cur) / min(var_ref, var_cur)
+                    
                     # Weather naturally varies year-over-year. Weather drift triggers WARN, not BLOCK.
-                    # Standard practice requires statistical significance (KS test p < 0.05) AND practical significance (Cohen's d >= 0.5)
-                    if ks_pval < KS_WARN_THRESHOLD and cohens_d >= 0.5:
+                    # Drift is flagged if we detect EITHER:
+                    # 1. Significant mean shift: KS test p < 0.05 AND Cohen's d >= 0.5
+                    # 2. Significant variance shift: Levene's test p < 0.05 AND variance ratio >= 1.5
+                    mean_drift = (ks_pval < KS_WARN_THRESHOLD and cohens_d >= 0.5)
+                    var_drift = (levene_pval < KS_WARN_THRESHOLD and var_ratio >= 1.5)
+                    
+                    if mean_drift or var_drift:
                         ks_status = "WARN"
                     else:
                         ks_status = "OK"
                 except Exception as exc:
-                    logger.warning(f"[{region}] KS test failed: {exc}")
+                    logger.warning(f"[{region}] Weather tests failed: {exc}")
 
     report["ks_pvalue"] = round(ks_pval, 6) if ks_pval is not None else None
+    report["levene_pvalue"] = round(levene_pval, 6) if levene_pval is not None else None
     report["ks_status"] = ks_status
 
     # ── Overall ──

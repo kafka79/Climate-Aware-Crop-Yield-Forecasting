@@ -175,7 +175,7 @@ def mdn_detect_bimodality_single(
                     distance = abs(y_top1 - y_top2)
                     if distance >= separation_threshold * effective_std:
                         is_bimodal = True
-                        valley_depth = float(1.0 - abs(top_w - sec_w) / (top_w + sec_w + 1e-8))
+                        valley_depth = float(1.0 - pdf_valley / (min(p_top1, p_top2) + 1e-8))
                         dominant_mode = y_top1
 
     return {

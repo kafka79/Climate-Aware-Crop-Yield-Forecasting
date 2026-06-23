@@ -39,6 +39,17 @@ class YieldExplainer:
             Dict[str, torch.Tensor]: Attributions per modality.
         """
         logger.info(f"Calculating multi-modal attributions (Steps={steps})...")
+        try:
+            device = next(iter(self.model.parameters())).device
+            if hasattr(device, "_mock_return_value") or not isinstance(device, (torch.device, str)):
+                device = torch.device("cpu")
+        except StopIteration:
+            device = torch.device("cpu")
+
+        sat = sat.to(device)
+        weather = weather.to(device)
+        soil = soil.to(device)
+
         baselines = baselines or {}
         
         # 1. Satellite Baseline: Temporal average spectral signature
@@ -65,6 +76,10 @@ class YieldExplainer:
             else:
                 default_soil = torch.cat([default_soil, torch.zeros(soil.shape[-1] - 3, dtype=soil.dtype, device=soil.device)])
             soil_base = default_soil.unsqueeze(0).expand_as(soil)
+
+        sat_base = sat_base.to(device)
+        weather_base = weather_base.to(device)
+        soil_base = soil_base.to(device)
             
         # Calculate attributions
         attributions = self.ig.attribute(

@@ -141,7 +141,13 @@ class TrainManager:
     def train_epoch(self, dataloader):
         self.model.train()
         total_loss = 0
+        batches_processed = 0
         for batch in tqdm(dataloader, desc="Training"):
+            self._sync_termination_flag()
+            if self._termination_requested.is_set():
+                logger.warning("Spot termination requested during training batch — breaking batch loop.")
+                break
+
             sat     = batch["sat"].to(self.device)
             weather = batch["weather"].to(self.device)
             soil    = batch["soil"].to(self.device)
@@ -159,8 +165,9 @@ class TrainManager:
             loss.backward()
             self.optimizer.step()
             total_loss += loss.item()
+            batches_processed += 1
 
-        num_batches = max(len(dataloader), 1)
+        num_batches = max(batches_processed, 1)
         return total_loss / num_batches
 
     def validate(self, dataloader):

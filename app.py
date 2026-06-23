@@ -24,6 +24,7 @@ YIELD_HISTORY = load_yield_history(CONFIG)
 if "live_results" not in st.session_state:
     st.session_state["live_results"] = {}
 
+@st.cache_data
 def generate_offline_features_json():
     import json
     from pathlib import Path
