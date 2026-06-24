@@ -270,9 +270,9 @@
         <form id="inference-form">
           <!-- Real-world Offline Usability Fix: Pre-cached Regional Profile selector -->
           <div class="form-group" style="margin-bottom: 1.5rem;" id="offline-region-group">
-            <label for="offline-region">Pre-cached Regional Data (Offline Select)</label>
+            <label for="offline-region">Region Profile (or use Manual Input)</label>
             <select id="offline-region">
-              <option value="" selected>-- Loading Pre-cached Profiles --</option>
+              <option value="__manual__" selected>✏️ Manual Input (enter your own values)</option>
             </select>
           </div>
 
@@ -410,24 +410,37 @@
     }
     
     // Real-world Offline Usability Fix: Fetch static JSON profiles cached via Service Worker
+    // If no profiles are available (or region isn't cached), the user can ALWAYS
+    // manually enter custom feature values into the form inputs and run predictions.
     async function loadRegionalFeatures() {
       const regionSelect = document.getElementById("offline-region");
+      const manualOption = '<option value="__manual__" selected>✏️ Manual Input (enter your own values)</option>';
+      
       try {
         const response = await fetch('/app/static/regional_features.json');
         if (response.ok) {
           const data = await response.json();
           window.regionalFeatures = data;
           
-          regionSelect.innerHTML = '<option value="" selected>-- Select Cached Regional Profile --</option>';
-          for (const regionName in data) {
-            const opt = document.createElement("option");
-            opt.value = regionName;
-            opt.innerText = `${regionName} (Year ${data[regionName].year})`;
-            regionSelect.appendChild(opt);
+          const regionKeys = Object.keys(data);
+          if (regionKeys.length > 0) {
+            regionSelect.innerHTML = manualOption;
+            for (const regionName of regionKeys) {
+              const opt = document.createElement("option");
+              opt.value = regionName;
+              opt.innerText = `${regionName} (Year ${data[regionName].year})`;
+              regionSelect.appendChild(opt);
+            }
+          } else {
+            regionSelect.innerHTML = manualOption;
           }
           
           regionSelect.addEventListener("change", (e) => {
             const regName = e.target.value;
+            if (regName === "__manual__") {
+              // Leave current values intact — user is in manual mode
+              return;
+            }
             if (regName && window.regionalFeatures[regName]) {
               const regData = window.regionalFeatures[regName];
               
@@ -453,11 +466,11 @@
             }
           });
         } else {
-          regionSelect.innerHTML = '<option value="" selected>-- No Pre-cached Profiles Found --</option>';
+          regionSelect.innerHTML = manualOption;
         }
       } catch (err) {
         console.warn("Failed to load offline regional features profiles:", err);
-        regionSelect.innerHTML = '<option value="" selected>-- Profiles Unavailable Offline --</option>';
+        regionSelect.innerHTML = manualOption;
       }
     }
     

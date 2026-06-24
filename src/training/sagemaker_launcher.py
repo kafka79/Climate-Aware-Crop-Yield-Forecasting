@@ -46,8 +46,64 @@ MAX_WAIT_HOURS         = int(os.getenv("SAGEMAKER_MAX_WAIT_HOURS", "6"))
 
 # ── Dataset size helper ───────────────────────────────────────────────────────
 
+def _estimate_zarr_inmemory_gb(zarr_path: Path) -> float:
+    """Estimate the uncompressed in-memory tensor size of a single Zarr store in GiB.
+
+    Reads the `.zarray` metadata files inside the Zarr directory to compute
+    shape × dtype_itemsize for each array, which represents the true memory
+    footprint when the data is loaded as numpy/torch tensors.
+
+    This avoids the vulnerability where compressed or sparse Zarr chunks occupy
+    very little disk space but expand to many GiB in RAM, causing OOM crashes
+    when the launcher incorrectly decides to train locally.
+    """
+    import json as _json
+
+    total_bytes = 0
+    for zarray_file in zarr_path.rglob(".zarray"):
+        try:
+            with open(zarray_file) as f:
+                meta = _json.load(f)
+            shape = meta.get("shape", [])
+            dtype_str = meta.get("dtype", "<f4")
+            # numpy dtype string → itemsize (bytes per element)
+            import numpy as _np
+            itemsize = _np.dtype(dtype_str).itemsize
+            num_elements = 1
+            for dim in shape:
+                num_elements *= dim
+            total_bytes += num_elements * itemsize
+        except Exception:
+            continue  # skip non-parseable metadata files
+
+    return total_bytes / (1024 ** 3)
+
+
 def _dataset_size_gb(features_dir: Path) -> float:
-    """Return total disk size of the Zarr feature stores in GiB."""
+    """Return the estimated in-memory tensor size of all Zarr stores in GiB.
+
+    Prefers the Zarr metadata-based estimate (uncompressed shape × dtype) over
+    raw disk size, because compressed/sparse Zarr directories drastically
+    under-report their true memory footprint on disk.
+
+    Falls back to disk size only when no Zarr metadata is found (e.g. non-Zarr
+    files in the directory).
+    """
+    zarr_stores = list(features_dir.glob("*.zarr"))
+    if zarr_stores:
+        inmemory_total = sum(_estimate_zarr_inmemory_gb(zs) for zs in zarr_stores)
+        if inmemory_total > 0:
+            disk_total = sum(
+                f.stat().st_size for f in features_dir.rglob("*") if f.is_file()
+            ) / (1024 ** 3)
+            logger.info(
+                f"Zarr in-memory estimate: {inmemory_total:.2f} GiB  "
+                f"(disk size: {disk_total:.2f} GiB, "
+                f"compression ratio: {disk_total / inmemory_total:.2f}x)"
+            )
+            return inmemory_total
+
+    # Fallback: raw disk size for non-Zarr or metadata-less directories
     total = sum(
         f.stat().st_size
         for f in features_dir.rglob("*")

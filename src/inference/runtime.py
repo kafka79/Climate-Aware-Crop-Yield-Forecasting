@@ -674,11 +674,15 @@ def run_inference(
         soil_dim = prepared["soil_tensor"].shape[-1]
         soil_median = _compute_regional_soil_median(config, soil_dim)
         if soil_median is None:
-            soil_median = np.array([6.5, 10.0, 1.5], dtype=np.float32)
-            if len(soil_median) > soil_dim:
-                soil_median = soil_median[:soil_dim]
-            elif len(soil_median) < soil_dim:
-                soil_median = np.pad(soil_median, (0, soil_dim - len(soil_median)))
+            # Canonical physical defaults: pH ~6.5, SOC ~10.0 g/kg, Nitrogen ~1.5 g/kg.
+            # Dynamically pad/slice to match the model's actual soil_dim to prevent
+            # dimension mismatch crashes if the feature set is later expanded.
+            _CANONICAL_SOIL_DEFAULTS = [6.5, 10.0, 1.5]
+            if soil_dim <= len(_CANONICAL_SOIL_DEFAULTS):
+                soil_median = np.array(_CANONICAL_SOIL_DEFAULTS[:soil_dim], dtype=np.float32)
+            else:
+                soil_median = np.zeros(soil_dim, dtype=np.float32)
+                soil_median[:len(_CANONICAL_SOIL_DEFAULTS)] = _CANONICAL_SOIL_DEFAULTS
         
         soil_base = torch.tensor(soil_median, dtype=torch.float32).unsqueeze(0)
 

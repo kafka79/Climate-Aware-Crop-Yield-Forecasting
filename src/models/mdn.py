@@ -314,6 +314,69 @@ def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: to
     
     return torch.mean(loss)
 
+def select_optimal_mixtures(
+    training_targets: torch.Tensor,
+    input_dim: int,
+    candidate_range: Tuple[int, ...] = (3, 5, 7, 10),
+    max_samples: int = 2000,
+) -> int:
+    """Estimate the optimal number of GMM components using the Bayesian Information Criterion (BIC).
+
+    Fits sklearn GaussianMixture models on a sample of the training yield
+    targets and selects the K with the lowest BIC.  This prevents both
+    under-fitting (too few modes for multi-cropping / extreme-climate regions)
+    and over-fitting (too many modes on small datasets).
+
+    Args:
+        training_targets: 1-D tensor of observed yield values from the training set.
+        input_dim: MDN input dimension (used only for logging context).
+        candidate_range: Tuple of K values to evaluate.
+        max_samples: Maximum number of samples to use (for speed).
+
+    Returns:
+        The optimal num_mixtures (int).  Falls back to 5 if sklearn is unavailable.
+    """
+    try:
+        from sklearn.mixture import GaussianMixture
+    except ImportError:
+        logger.warning(
+            "scikit-learn not installed — cannot auto-select num_mixtures. "
+            "Falling back to default K=5."
+        )
+        return 5
+
+    import numpy as np
+
+    data = training_targets.detach().cpu().numpy().reshape(-1, 1)
+    if len(data) > max_samples:
+        rng = np.random.default_rng(42)
+        indices = rng.choice(len(data), size=max_samples, replace=False)
+        data = data[indices]
+
+    best_k = candidate_range[0]
+    best_bic = float("inf")
+    for k in candidate_range:
+        if k > len(data):
+            continue
+        try:
+            gmm = GaussianMixture(n_components=k, random_state=42, max_iter=100)
+            gmm.fit(data)
+            bic = gmm.bic(data)
+            logger.debug(f"BIC for K={k}: {bic:.2f}")
+            if bic < best_bic:
+                best_bic = bic
+                best_k = k
+        except Exception as exc:
+            logger.warning(f"GaussianMixture fit failed for K={k}: {exc}")
+            continue
+
+    logger.info(
+        f"Adaptive mixture selection: optimal K={best_k} "
+        f"(BIC={best_bic:.2f}, input_dim={input_dim})"
+    )
+    return best_k
+
+
 def initialize_mdn_head(input_dim: int, num_mixtures: int = 5):
     """
     Initialize MDN head for the model.
