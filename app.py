@@ -77,7 +77,9 @@ def generate_offline_features_json():
     except Exception:
         pass
 
-generate_offline_features_json()
+if "offline_features_generated" not in st.session_state:
+    generate_offline_features_json()
+    st.session_state["offline_features_generated"] = True
 
 # ── Apple-grade Design System ────────────────────────────────────────────────
 # White canvas, Inter font, high-contrast for outdoor screens, zero noise.
@@ -243,6 +245,9 @@ with st.sidebar:
 if run_live:
     try:
         st.session_state["live_results"][result_key] = run_inference(region=region, year=int(year))
+        # Clear the streamlit cache and dynamically regenerate to capture any new inputs
+        generate_offline_features_json.clear()
+        generate_offline_features_json()
     except InferenceUnavailableError as exc:
         st.session_state["live_results"].pop(result_key, None)
         st.error(str(exc))

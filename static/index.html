@@ -529,7 +529,19 @@
         parseFloat(document.getElementById("soil-nit").value)
       ];
       
-      const T = 12;
+      let T = 12;
+      try {
+        if (session.inputMetadata && session.inputMetadata.satellite && session.inputMetadata.satellite.dims) {
+          const dims = session.inputMetadata.satellite.dims;
+          if (dims && dims[1] && typeof dims[1] === 'number' && dims[1] > 0) {
+            T = dims[1];
+            console.log("Dynamically resolved sequence length T =", T);
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to dynamically read sequence length T from ONNX session metadata, falling back to T = 12:", err);
+      }
+
       const satFlattened = new Float32Array(T * 5);
       const weatherFlattened = new Float32Array(T * 3);
       for (let t = 0; t < T; t++) {
@@ -580,6 +592,7 @@
         warningBox.style.display = "none";
         distType.innerText = "Unimodal";
         distType.style.color = "var(--text)";
+        document.getElementById("predicted-yield").style.color = "var(--text)";
         
         if (significant.length >= 2) {
           const m1 = significant[0];
@@ -607,6 +620,21 @@
           }
         }
         
+        if (finalYield < 0.0 || finalYield > 15.0) {
+          warningBox.className = "alert-box critical";
+          warningBox.style.display = "block";
+          warningBox.innerHTML = `
+            <strong>🚨 Out-of-Bounds Model Forecast Error</strong><br>
+            The model produced an implausible yield forecast of <strong>${finalYield.toFixed(2)} t/ha</strong>. 
+            This usually indicates that the input canopy, weather, or soil parameters are highly anomalous 
+            or outside the trained calibration range of the neural network.
+          `;
+          document.getElementById("predicted-yield").innerText = "Error";
+          document.getElementById("predicted-yield").style.color = "#dc2626";
+          document.getElementById("uncertainty-level").innerText = "—";
+          return;
+        }
+
         document.getElementById("predicted-yield").innerText = `${finalYield.toFixed(2)}`;
         document.getElementById("uncertainty-level").innerText = `${std.toFixed(2)}`;
         

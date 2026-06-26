@@ -64,7 +64,8 @@ class MultiModalTransformer(nn.Module):
         # Transformer Layers (applied to temporal features ONLY)
         encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim,
                                                    nhead=self.config["num_heads"],
-                                                   dropout=self.config["dropout"])
+                                                   dropout=self.config["dropout"],
+                                                   batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer,
                                                          num_layers=self.config["num_layers"])
 
@@ -75,6 +76,10 @@ class MultiModalTransformer(nn.Module):
         # Static per-feature sensitivity for input perturbation noise scaling.
         sensitivity_vals = self.config.get("soil_sensitivity", [1.0] * soil_dim)
         self.register_buffer("soil_sensitivity", torch.tensor(sensitivity_vals, dtype=torch.float32))
+
+        # Default baseline values matching the expected scales of pH, SOC, and Nitrogen for Z-scoring
+        mean_vals = self.config.get("soil_mean", [6.5, 15.0, 1.5])
+        self.register_buffer("soil_mean", torch.tensor(mean_vals, dtype=torch.float32))
 
         # Learnable gating parameters initialized to 1.0 for backward compatibility
         self.gate_cross = nn.Parameter(torch.ones(1))
@@ -112,9 +117,11 @@ class MultiModalTransformer(nn.Module):
 
         # 3. Input perturbation/jittering regularization
         if self.training and self.use_jitter:
-            sensitivity = self.soil_sensitivity.abs() + 1e-8  # (F_s,)
-            noise = torch.randn_like(soil) * self.jitter_noise_scale * sensitivity
-            soil = soil + noise
+            std_vals = self.soil_sensitivity.abs() + 1e-8
+            soil_standardized = (soil - self.soil_mean) / std_vals
+            noise = torch.randn_like(soil_standardized) * self.jitter_noise_scale
+            soil_standardized = soil_standardized + noise
+            soil = soil_standardized * std_vals + self.soil_mean
 
         # 4. Encode soil
         soil_enc = self.soil_encoder(soil).unsqueeze(1)       # (B, 1, D)
@@ -136,9 +143,8 @@ class MultiModalTransformer(nn.Module):
         fused = self.gate_cross * cross_out + self.gate_weather * weather_enc + self.gate_soil * soil_enc  # (B, T, D)
         
         # 7. Transformer self-attention refinement
-        fused = fused.permute(1, 0, 2)                        # (T, B, D)
-        out = self.transformer_encoder(fused)
-        out = out.permute(1, 0, 2)                            # (B, T, D)
+        # With batch_first=True, no permute is necessary!
+        out = self.transformer_encoder(fused)                 # (B, T, D)
 
         # 8. Global Average Pooling over time
         out = torch.mean(out, dim=1)                          # (B, D)
