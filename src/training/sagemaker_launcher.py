@@ -381,16 +381,23 @@ def main() -> None:
     features_dir = Path(args.features_dir)
     size_gb = 0.0
 
+    # Determine if local directory has any actual feature files
+    has_local_data = False
     if features_dir.exists():
+        any_files = any(f.is_file() for f in features_dir.rglob("*"))
+        if any_files:
+            has_local_data = True
+
+    if has_local_data:
         size_gb = _dataset_size_gb(features_dir)
         logger.info(f"Feature store size (local): {size_gb:.2f} GiB  (threshold: {args.threshold_gb} GiB)")
     else:
-        logger.warning(f"Local features dir not found: {features_dir}. Checking S3 features size...")
+        logger.warning(f"Local features dir empty or not found: {features_dir}. Checking S3 features size...")
         if args.s3_bucket:
             size_gb = _s3_dataset_size_gb(args.s3_bucket, args.s3_features_prefix)
             logger.info(f"Feature store size (remote S3): {size_gb:.2f} GiB  (threshold: {args.threshold_gb} GiB)")
         else:
-            logger.error("Local features dir missing, and no S3 bucket specified. Cannot determine dataset size.")
+            logger.error("Local features dir missing/empty, and no S3 bucket specified. Cannot determine dataset size.")
             sys.exit(1)
 
     if size_gb < args.threshold_gb:

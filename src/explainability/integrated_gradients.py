@@ -22,7 +22,7 @@ class YieldExplainer:
         return output
         
     def calculate_attributions(self, sat: torch.Tensor, weather: torch.Tensor, 
-                               soil: torch.Tensor, target_idx: int = 0, steps: int = 50,
+                               soil: torch.Tensor, target_idx: int = 0, steps: int = 150,
                                baselines: Optional[Dict[str, torch.Tensor]] = None):
         """
         Calculate Integrated Gradients attribution for each modality.
@@ -64,17 +64,19 @@ class YieldExplainer:
         else:
             weather_base = weather.mean(dim=1, keepdim=True).expand_as(weather)
             
-        # 3. Soil Baseline: Realistic default (pH ~6.5, SOC ~10.0, N ~1.5) or passed baseline
+        # 3. Soil Baseline: Realistic default or passed baseline (dynamically aligning with model's expected scales)
         if "soil" in baselines:
             soil_base = baselines["soil"]
         else:
-            # Use realistic global averages (pH ~6.5, SOC ~10.0, Nitrogen ~1.5) instead of absolute zero.
-            default_soil = torch.tensor([6.5, 10.0, 1.5], dtype=soil.dtype, device=soil.device)
+            if hasattr(self.model, "soil_mean") and isinstance(self.model.soil_mean, torch.Tensor):
+                default_soil = self.model.soil_mean.to(device=soil.device, dtype=soil.dtype)
+            else:
+                default_soil = torch.tensor([6.5, 10.0, 1.5], dtype=soil.dtype, device=soil.device)
             # Slice/pad to match soil dimensions
-            if soil.shape[-1] <= 3:
+            if soil.shape[-1] <= len(default_soil):
                 default_soil = default_soil[:soil.shape[-1]]
             else:
-                default_soil = torch.cat([default_soil, torch.zeros(soil.shape[-1] - 3, dtype=soil.dtype, device=soil.device)])
+                default_soil = torch.cat([default_soil, torch.zeros(soil.shape[-1] - len(default_soil), dtype=soil.dtype, device=soil.device)])
             soil_base = default_soil.unsqueeze(0).expand_as(soil)
 
         sat_base = sat_base.to(device)

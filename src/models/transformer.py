@@ -132,8 +132,19 @@ class MultiModalTransformer(nn.Module):
         weather_kv = weather_enc.permute(1, 0, 2)             # (T, B, D)
         soil_kv = soil_enc.permute(1, 0, 2)                   # (1, B, D)
         
+        # Downsample key/values if sequence length is large (e.g., daily or hourly data)
+        # to ensure linear O(T) memory scaling and prevent quadratic bottleneck.
+        # This keeps the key/value context length bounded, maintaining O(T) complexity.
+        T = sat.shape[1]
+        max_kv_len = self.config.get("max_kv_len", 12)
+        if T > max_kv_len:
+            # weather_kv shape is (T, B, D) -> convert to (B, D, T) for 1D pooling
+            weather_kv_t = weather_kv.permute(1, 2, 0)
+            weather_kv_pooled = torch.nn.functional.adaptive_avg_pool1d(weather_kv_t, max_kv_len)
+            weather_kv = weather_kv_pooled.permute(2, 0, 1)  # (max_kv_len, B, D)
+        
         # Combine weather and soil into a single context sequence for cross-attention
-        context_kv = torch.cat([weather_kv, soil_kv], dim=0)  # (T+1, B, D)
+        context_kv = torch.cat([weather_kv, soil_kv], dim=0)  # (K+1, B, D) where K = min(T, max_kv_len)
         
         cross_out, _ = self.cross_attn(sat_q, context_kv, context_kv)  # (T, B, D)
         cross_out = cross_out.permute(1, 0, 2)                # (B, T, D)

@@ -288,10 +288,23 @@ def _compute_regional_soil_median(
     # orders, NaN fills any columns missing from a particular file.
     combined = pd.concat(frames, ignore_index=True)
     expected_cols = ["ph", "soc", "nitrogen"]
-    median_series = combined.median().reindex(expected_cols, fill_value=0.0)
-    median_values = median_series.to_numpy(dtype=np.float32)  # consistent column order
-    # Replace any NaN (from columns missing in some files) with 0
-    median_values = np.nan_to_num(median_values, nan=0.0)
+    default_vals = {"ph": 6.5, "soc": 15.0, "nitrogen": 1.5}
+    median_series = combined.median()
+    
+    # Fill missing column values in median_series with their default values
+    for col in expected_cols:
+        if col not in median_series or pd.isna(median_series[col]):
+            median_series[col] = default_vals[col]
+            
+    # Reindex to ensure strict expected column order
+    median_series = median_series.reindex(expected_cols)
+    median_values = median_series.to_numpy(dtype=np.float32)
+    
+    # Double check for any NaNs (just in case) and fill with defaults
+    for idx, col in enumerate(expected_cols):
+        if np.isnan(median_values[idx]):
+            median_values[idx] = default_vals[col]
+            
     return _align_vector_length(median_values, soil_dim)
 
 
