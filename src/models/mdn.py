@@ -285,9 +285,9 @@ def mdn_safe_point_estimate(
                 points.append(valley_mean)
         return points, reports
 
-def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: torch.Tensor, entropy_weight: float = 0.01):
+def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: torch.Tensor, entropy_weight: float = 0.0):
     """
-    Negative Log Likelihood (NLL) Loss for MDN with Entropy Regularization.
+    Negative Log Likelihood (NLL) Loss for MDN with optional Entropy Regularization.
     target: (B, O)
     """
     # target reshaped to (B, 1, O) to broadcast with (B, K, O)
@@ -306,11 +306,12 @@ def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: to
     # Use LogSumExp for stability
     nll = -torch.logsumexp(torch.log(pi + 1e-10) + log_prob, dim=1) # (B,)
     
-    # Entropy Regularization to prevent mode collapse
-    # entropy = -sum(pi * log(pi))
-    entropy_penalty = torch.sum(pi * torch.log(pi + 1e-10), dim=1) 
-    
-    loss = nll + entropy_weight * entropy_penalty
+    loss = nll
+    if entropy_weight > 0.0:
+        # Entropy Regularization to prevent mode collapse
+        # entropy = -sum(pi * log(pi))
+        entropy_penalty = torch.sum(pi * torch.log(pi + 1e-10), dim=1) 
+        loss = loss + entropy_weight * entropy_penalty
     
     return torch.mean(loss)
 

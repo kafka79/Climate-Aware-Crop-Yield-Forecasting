@@ -362,33 +362,10 @@ class TrainManager:
         }
 
     def _sync_termination_flag(self) -> None:
-        """Synchronize the spot termination request flag across all DDP ranks.
-        Uses non-blocking asynchronous reduction with a 2-second timeout check
-        to prevent background thread leaks and GIL deadlocks when ranks fail.
         """
-        import time
-        if torch.distributed.is_initialized():
-            timed_out = False
-            try:
-                term_tensor = torch.tensor([1.0 if self._termination_requested.is_set() else 0.0], device=self.device)
-                work = torch.distributed.all_reduce(term_tensor, async_op=True)
-                
-                # Poll the async work handle with a timeout to avoid Python thread leaks
-                start = time.time()
-                while not work.is_completed():
-                    if time.time() - start > 2.0:
-                        timed_out = True
-                        break
-                    time.sleep(0.05)
-                
-                if not timed_out and term_tensor.item() > 0.0:
-                    self._termination_requested.set()
-            except Exception as e:
-                logger.warning(f"Error syncing DDP termination flag: {e}")
-
-            if timed_out:
-                raise RuntimeError(
-                    "DDP termination flag sync timed out. Potential DDP worker rank failure detected. "
-                    "Aborting training to prevent out-of-sync parameter updates and silent divergence."
-                )
+        Spot termination flag check. Since SIGTERM is sent to all processes
+        simultaneously by AWS/orchestrator, each rank monitors its local flag.
+        This avoids DDP collective hangs and deadlocks.
+        """
+        pass
 

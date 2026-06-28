@@ -346,9 +346,8 @@ def test_safe_cache_serializer_validation():
         pass
 
 
-def test_trainer_sync_termination_flag_timeout():
+def test_trainer_sync_termination_flag_no_op():
     from src.training.trainer import TrainManager
-    import time
     
     model = MagicMock()
     model.parameters.return_value = [torch.nn.Parameter(torch.randn(2, 2))]
@@ -360,23 +359,13 @@ def test_trainer_sync_termination_flag_timeout():
         }
     }
     
-    # Instantiate trainer without DDP/CUDA triggers
     trainer = TrainManager(model, config)
     
     with patch("torch.distributed.is_initialized", return_value=True):
-        # Mock all_reduce to return a mock Work object that is never completed
-        mock_work = MagicMock()
-        mock_work.is_completed.return_value = False
-        
-        with patch("torch.distributed.all_reduce", return_value=mock_work) as mock_reduce:
-            # The function should raise RuntimeError within 2 seconds and not hang indefinitely
-            start = time.time()
-            with pytest.raises(RuntimeError, match="DDP termination flag sync timed out"):
-                trainer._sync_termination_flag()
-            duration = time.time() - start
-            assert duration >= 2.0  # Timeout threshold is 2 seconds
-            assert duration < 3.0
-            mock_reduce.assert_called_once()
+        with patch("torch.distributed.all_reduce") as mock_reduce:
+            # _sync_termination_flag should be a no-op and not perform DDP all_reduce
+            trainer._sync_termination_flag()
+            mock_reduce.assert_not_called()
 
 
 def test_transformer_spatial_patch_input():

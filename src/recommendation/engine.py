@@ -64,33 +64,33 @@ class RecommendationEngine:
 
     def _generate_heuristic_advice(self, result: Dict[str, Any]) -> List[str]:
         """
-        A sophisticated heuristic engine that maps attribution and risk to specific advice.
+        A sophisticated heuristic engine that maps attribution and risk to specific agronomic advice.
         """
         advice = []
         attr = result["attribution"]
         risk = str(result.get("risk", "")).upper()
         
-        # 1. Attribution-Specific Logic (Dynamic 'Why')
+        # 1. Attribution-Specific Logic (Dynamic 'Why' & Specific Interventions)
         top_factor = max(attr, key=attr.get)
         
         if top_factor == "Weather":
-            advice.append(f"🌦️ **Weather Dominance ({attr['Weather']:.0%}):** The model is highly sensitive to recent climate shifts. Prioritize monitoring short-term weather alerts.")
+            advice.append(f"🌦️ **Weather Dominance ({attr['Weather']:.0%}):** High sensitivity to weather variations. If experiencing excessive seasonal precipitation, clear peripheral drainage trenches to prevent crop root rot. Under dry conditions, initiate deficit irrigation cycles and apply organic mulching to retard evaporation.")
         elif top_factor == "Satellite":
-            advice.append(f"🛰️ **Biomass Signal ({attr['Satellite']:.0%}):** The forecast is driven primarily by current crop vigor (NDVI). The crop looks healthy, but maintain vigilance for late-season pests.")
+            advice.append(f"🛰️ **Biomass Signal ({attr['Satellite']:.0%}):** Yield is driven by crop vigor (NDVI). To maintain this progress, complete a split-nitrogen top-dressing before panicle initiation, and monitor canopy density closely to apply pest management protocols at the first sign of infestation.")
         elif top_factor == "Soil":
-            advice.append(f"🌱 **Soil Constraints ({attr['Soil']:.0%}):** Regional soil properties are limiting the yield ceiling. Consider a mid-season NPK top-dress if moisture allows.")
+            advice.append(f"🌱 **Soil Constraints ({attr['Soil']:.0%}):** Soil composition limits regional yield ceiling. To bypass root absorption constraints, apply a customized foliar spray of micro-nutrients (specifically Zinc and Boron) alongside a targeted mid-season NPK top-dress.")
 
         # 2. Risk-Based Logic
         if "HIGH" in risk:
-            advice.append("🚨 **Emergency Action:** Yield is significantly below the 5-year trend. Conduct a field-level audit for water stress or nutrient deficiency immediately.")
+            advice.append("🚨 **Emergency Action:** Yield is significantly below trend. Conduct a soil-moisture profile audit and check leaf tissue for nitrogen deficiency. Consider micro-irrigation or nitrogen foliar application if stress is confirmed.")
         elif "LOW" in risk:
-            advice.append("📈 **Surplus Opportunity:** Yield is above average. Secure storage and transport logistics early to avoid post-harvest losses.")
+            advice.append("📈 **Surplus Preparation:** Expected yield is above average. Coordinate storage facility capacity, source drying equipment early to prevent post-harvest mold, and engage local distribution networks to lock in optimal pricing.")
 
         # 3. Uncertainty Logic (dimension-safe denominator to prevent ZeroDivisionError)
         predicted = result.get("predicted_yield", 0.0)
         denominator = max(abs(predicted), 0.01)  # never divide by zero regardless of model output
         range_pct = (result["upper_bound"] - result["lower_bound"]) / denominator
         if range_pct > 0.4:
-            advice.append("⚠️ **Data Volatility:** High variance in the forecast. This usually indicates conflicting signals between satellite imagery and weather data. Re-verify the forecast in 7 days.")
+            advice.append("⚠️ **Risk Hedging (Data Volatility):** High forecast variance indicates conflicting satellite and weather indicators. Postpone intensive fertilizer applications to avoid wasting inputs. Symmetrically prepare channels—clear drainage path (for potential wet spikes) and check pump readiness (for dry drops).")
 
         return advice

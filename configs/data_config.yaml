@@ -42,3 +42,8 @@ weather:
 yield:
   historical_years: [2018, 2024]
   crops: ["Rice", "Wheat"]
+
+drift_detection:
+  psi_warn_threshold: 0.10
+  psi_block_threshold: 0.25
+  ks_warn_threshold: 0.05

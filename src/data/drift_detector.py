@@ -272,7 +272,6 @@ KS_WARN_THRESHOLD   = 0.05
 
 
 def check_region_drift(
-
     region: str,
     reference_zarr: Path,
     current_zarr: Path,
@@ -280,6 +279,9 @@ def check_region_drift(
     current_year: int,
     reference_weather: Optional[Path] = None,
     current_weather: Optional[Path] = None,
+    psi_warn_threshold: float = PSI_WARN_THRESHOLD,
+    psi_block_threshold: float = PSI_BLOCK_THRESHOLD,
+    ks_warn_threshold: float = KS_WARN_THRESHOLD,
 ) -> Dict[str, Any]:
     """Run full drift check for one region.
 
@@ -297,9 +299,9 @@ def check_region_drift(
     if ref_ndvi is not None and cur_ndvi is not None and len(ref_ndvi) > 5 and len(cur_ndvi) > 5:
         psi = _psi(ref_ndvi, cur_ndvi)
         report["ndvi_psi"] = round(psi, 4)
-        if psi >= PSI_BLOCK_THRESHOLD:
+        if psi >= psi_block_threshold:
             report["ndvi_status"] = "BLOCK"
-        elif psi >= PSI_WARN_THRESHOLD:
+        elif psi >= psi_warn_threshold:
             report["ndvi_status"] = "WARN"
         else:
             report["ndvi_status"] = "OK"
@@ -342,8 +344,8 @@ def check_region_drift(
                     # Drift is flagged if we detect EITHER:
                     # 1. Significant mean shift: KS test p < 0.05 AND Cohen's d >= 0.5
                     # 2. Significant variance shift: Levene's test p < 0.05 AND variance ratio >= 1.5
-                    mean_drift = (ks_pval < KS_WARN_THRESHOLD and cohens_d >= 0.5)
-                    var_drift = (levene_pval < KS_WARN_THRESHOLD and var_ratio >= 1.5)
+                    mean_drift = (ks_pval < ks_warn_threshold and cohens_d >= 0.5)
+                    var_drift = (levene_pval < ks_warn_threshold and var_ratio >= 1.5)
                     
                     if mean_drift or var_drift:
                         ks_status = "WARN"
@@ -444,6 +446,9 @@ def run_drift_check(
     reference_year: int,
     current_year: int,
     reference_dir: Optional[Path] = None,
+    psi_warn_threshold: float = PSI_WARN_THRESHOLD,
+    psi_block_threshold: float = PSI_BLOCK_THRESHOLD,
+    ks_warn_threshold: float = KS_WARN_THRESHOLD,
 ) -> List[Dict]:
     """Scan all regions in features_dir and return drift reports.
 
@@ -491,6 +496,9 @@ def run_drift_check(
             current_year=current_year,
             reference_weather=weather_ref if weather_ref.exists() else None,
             current_weather=weather_cur if weather_cur.exists() else None,
+            psi_warn_threshold=psi_warn_threshold,
+            psi_block_threshold=psi_block_threshold,
+            ks_warn_threshold=ks_warn_threshold,
         )
         reports.append(report)
 
@@ -508,6 +516,8 @@ def main() -> None:
                         help="Year to treat as stable reference")
     parser.add_argument("--current-year",   type=int, default=2023,
                         help="Year to check for drift")
+    parser.add_argument("--config",         default="configs/data_config.yaml",
+                        help="Path to data config file")
     parser.add_argument("--output",         default="experiments/drift_report.json",
                         help="Where to write the JSON report")
     args = parser.parse_args()
@@ -526,12 +536,34 @@ def main() -> None:
         )
         reference_dir = None
 
+    # Load configuration
+    config_path = Path(args.config)
+    psi_warn = PSI_WARN_THRESHOLD
+    psi_block = PSI_BLOCK_THRESHOLD
+    ks_warn = KS_WARN_THRESHOLD
+    
+    if config_path.exists():
+        try:
+            import yaml
+            with open(config_path) as f:
+                config = yaml.safe_load(f) or {}
+            drift_conf = config.get("drift_detection", {})
+            psi_warn = float(drift_conf.get("psi_warn_threshold", psi_warn))
+            psi_block = float(drift_conf.get("psi_block_threshold", psi_block))
+            ks_warn = float(drift_conf.get("ks_warn_threshold", ks_warn))
+            logger.info(f"Loaded drift thresholds from config: PSI warn={psi_warn}, block={psi_block}, KS warn={ks_warn}")
+        except Exception as e:
+            logger.warning(f"Failed to load config at {config_path}, using defaults: {e}")
+
     logger.info(f"Running drift check: reference={args.reference_year}, current={args.current_year}")
     if reference_dir:
         logger.info(f"Using S3-backed reference store: {reference_dir}")
 
     reports = run_drift_check(
-        features_dir, args.reference_year, args.current_year, reference_dir
+        features_dir, args.reference_year, args.current_year, reference_dir,
+        psi_warn_threshold=psi_warn,
+        psi_block_threshold=psi_block,
+        ks_warn_threshold=ks_warn
     )
 
     # Send alerts if warnings/blocks exist and webhook is configured
