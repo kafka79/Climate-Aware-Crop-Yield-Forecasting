@@ -36,13 +36,19 @@ class PredictionRequest(BaseModel):
     weather: List[List[float]] # (T, F_w)
     soil: List[float] # (F_s)
 
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
 class PredictionResponse(BaseModel):
     yield_prediction: float
     explanation: Dict[str, Any] = None
 
+# Mount static files directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to the Crop Yield Prediction API"}
+    return FileResponse("static/index.html")
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(request: PredictionRequest):

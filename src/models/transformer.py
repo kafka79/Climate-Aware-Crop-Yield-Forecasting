@@ -106,6 +106,22 @@ class MultiModalTransformer(nn.Module):
             sat_spatial = self.spatial_cnn(sat_flat)  # (B * T, C, 1, 1)
             sat = sat_spatial.view(B, T, C)          # (B, T, C)
 
+        # Downsample sequence length if it exceeds max_kv_len to eliminate O(T^2) self-attention complexity
+        T = sat.shape[1]
+        max_kv_len = self.config.get("max_kv_len", 12)
+        if T > max_kv_len:
+            # sat is (B, T, C) -> transpose to (B, C, T) for 1D pooling
+            sat_t = sat.transpose(1, 2)
+            sat_pooled = torch.nn.functional.adaptive_avg_pool1d(sat_t, max_kv_len)
+            sat = sat_pooled.transpose(1, 2)
+            
+            # weather is (B, T, F_w) -> transpose to (B, F_w, T) for 1D pooling
+            weather_t = weather.transpose(1, 2)
+            weather_pooled = torch.nn.functional.adaptive_avg_pool1d(weather_t, max_kv_len)
+            weather = weather_pooled.transpose(1, 2)
+            
+            T = max_kv_len
+
         # 1. Encode satellite: temporal conv + linear residual path
         sat_t = sat.transpose(1, 2)                          # (B, C, T)
         sat_conv = self.temporal_conv(sat_t).transpose(1, 2)  # (B, T, D)

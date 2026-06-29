@@ -210,16 +210,130 @@ def mdn_detect_bimodality(
         If batch size is 1 (or 1D tensors): a dict report.
         If batch size > 1: a list of dict reports.
     """
+    import numpy as np
+
+    # Standardize input dimensions to 2D (Batch, Component)
+    is_single = False
     if pi.dim() == 1:
-        return mdn_detect_bimodality_single(pi, sigma, mu, separation_threshold, weight_threshold)
+        pi = pi.unsqueeze(0)
+        sigma = sigma.unsqueeze(0)
+        mu = mu.unsqueeze(0)
+        is_single = True
+    elif pi.size(0) == 1:
+        is_single = True
+
+    B, K = pi.shape
+    device = pi.device
+
+    # Convert sigma/mu to (B, K) since output_dim O = 1
+    sigmas = sigma[..., 0]  # (B, K)
+    means = mu[..., 0]      # (B, K)
+
+    # Determine dynamic range for each batch item: min(mu - 3*sigma) to max(mu + 3*sigma)
+    y_min = torch.min(means - 3.0 * sigmas, dim=1).values
+    y_max = torch.max(means + 3.0 * sigmas, dim=1).values
+    y_min = torch.clamp(y_min, min=0.0)
+    y_max = torch.clamp(y_max, min=0.1)
+
+    # Construct linear grid of shape (B, 200) on device
+    steps = torch.linspace(0.0, 1.0, steps=200, device=device)
+    grid = y_min.unsqueeze(1) + steps.unsqueeze(0) * (y_max - y_min).unsqueeze(1)  # (B, 200)
+
+    # Evaluate GMM PDF in a vectorized tensor operation across the entire batch
+    grid_uns = grid.unsqueeze(1)       # (B, 1, 200)
+    means_uns = means.unsqueeze(2)     # (B, K, 1)
+    sigmas_uns = sigmas.unsqueeze(2)   # (B, K, 1)
+    pi_uns = pi.unsqueeze(2)           # (B, K, 1)
+
+    exponent = -0.5 * ((grid_uns - means_uns) / sigmas_uns).pow(2)
+    coeff = pi_uns / (sigmas_uns * math.sqrt(2.0 * math.pi))
+    pdf = torch.sum(coeff * torch.exp(exponent), dim=1)  # (B, 200)
+
+    reports = []
     
-    if pi.size(0) == 1:
-        return mdn_detect_bimodality_single(pi[0], sigma[0], mu[0], separation_threshold, weight_threshold)
+    # Detach and move to CPU/numpy just for final scalar metrics extraction
+    pi_np = pi.detach().cpu().numpy()
+    sigmas_np = sigmas.detach().cpu().numpy()
+    means_np = means.detach().cpu().numpy()
+    pdf_np = pdf.detach().cpu().numpy()
+    grid_np = grid.detach().cpu().numpy()
+
+    for i in range(B):
+        pdf_i = pdf_np[i]
+        grid_i = grid_np[i]
         
-    return [
-        mdn_detect_bimodality_single(pi[i], sigma[i], mu[i], separation_threshold, weight_threshold)
-        for i in range(pi.size(0))
-    ]
+        # Find local maxima (peaks) of the continuous PDF
+        peaks = []
+        for idx in range(1, len(grid_i) - 1):
+            if pdf_i[idx] > pdf_i[idx - 1] and pdf_i[idx] > pdf_i[idx + 1]:
+                peaks.append((float(grid_i[idx]), float(pdf_i[idx])))
+
+        # Sort peaks by density value descending
+        peaks.sort(key=lambda x: x[1], reverse=True)
+
+        is_bimodal = False
+        valley_depth = 0.0
+        
+        w_t = pi_np[i]
+        s_t = sigmas_np[i]
+        m_t = means_np[i]
+
+        expected_val = float((pi[i].unsqueeze(-1) * mu[i]).sum().item())
+        dominant_mode = expected_val
+
+        # Calculate standard deviation of the mixture
+        second_moment = float((pi[i].unsqueeze(-1) * (sigma[i].pow(2) + mu[i].pow(2))).sum().item())
+        mix_var = second_moment - expected_val**2
+        mix_std = math.sqrt(max(mix_var, 1e-6))
+
+        # Find unique significant modes by mapping peaks back to closest components
+        significant = []
+        seen_indices = set()
+        for peak_y, peak_pdf in peaks:
+            closest_idx = int(np.argmin(np.abs(m_t - peak_y)))
+            if closest_idx not in seen_indices:
+                seen_indices.add(closest_idx)
+                w = float(w_t[closest_idx])
+                if w >= weight_threshold:
+                    significant.append((w, peak_y))
+
+        significant.sort(key=lambda x: x[0], reverse=True)
+
+        if len(peaks) >= 2:
+            y_top1, p_top1 = peaks[0]
+            y_top2, p_top2 = peaks[1]
+
+            if p_top2 >= 0.1 * p_top1:
+                idx_1 = np.argmin(np.abs(grid_i - y_top1))
+                idx_2 = np.argmin(np.abs(grid_i - y_top2))
+                start_idx, end_idx = min(idx_1, idx_2), max(idx_1, idx_2)
+
+                if end_idx > start_idx + 1:
+                    valley_idx = start_idx + np.argmin(pdf_i[start_idx:end_idx + 1])
+                    pdf_valley = pdf_i[valley_idx]
+
+                    if pdf_valley < 0.8 * min(p_top1, p_top2):
+                        closest_idx1 = int(np.argmin(np.abs(m_t - y_top1)))
+                        closest_idx2 = int(np.argmin(np.abs(m_t - y_top2)))
+                        top_w = float(w_t[closest_idx1])
+                        sec_w = float(w_t[closest_idx2])
+
+                        pooled_sigma = math.sqrt((top_w * s_t[closest_idx1]**2 + sec_w * s_t[closest_idx2]**2) / (top_w + sec_w + 1e-8))
+                        effective_std = min(mix_std, 4.0 * pooled_sigma)
+                        distance = abs(y_top1 - y_top2)
+                        if distance >= separation_threshold * effective_std:
+                            is_bimodal = True
+                            valley_depth = float(1.0 - pdf_valley / (min(p_top1, p_top2) + 1e-8))
+                            dominant_mode = y_top1
+
+        reports.append({
+            "is_bimodal": is_bimodal,
+            "modes": significant,
+            "dominant_mode": dominant_mode,
+            "valley_depth": valley_depth,
+        })
+
+    return reports[0] if is_single else reports
 
 
 def mdn_safe_point_estimate(
@@ -290,14 +404,25 @@ def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: to
     Negative Log Likelihood (NLL) Loss for MDN with optional Entropy Regularization.
     target: (B, O)
     """
+    # Calculate target standard deviation before expansion to adjust entropy_weight dynamically
+    with torch.no_grad():
+        if target.dim() <= 1 or target.size(0) <= 1:
+            dynamic_scale = torch.tensor(1.0, device=target.device)
+        else:
+            # target standard deviation along the batch dimension
+            target_std = torch.std(target.float(), dim=0)
+            # Normalize target standard deviation relative to baseline (e.g. 2.0 t/ha std)
+            dynamic_scale = torch.clamp(target_std / 2.0, max=1.0)
+            dynamic_scale = torch.mean(dynamic_scale) # average over output dimension O
+
     # target reshaped to (B, 1, O) to broadcast with (B, K, O)
     if target.dim() == 1:
         target = target.unsqueeze(-1) # (B, 1)
-    target = target.unsqueeze(1).expand_as(mu) # (B, K, O)
+    target_expanded = target.unsqueeze(1).expand_as(mu) # (B, K, O)
     
     # Calculate GMM probability
     m = torch.distributions.Normal(loc=mu, scale=sigma)
-    log_prob = m.log_prob(target) # (B, K, O)
+    log_prob = m.log_prob(target_expanded) # (B, K, O)
     
     # Sum over output dimension
     log_prob = torch.sum(log_prob, dim=2) # (B, K)
@@ -308,10 +433,10 @@ def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: to
     
     loss = nll
     if entropy_weight > 0.0:
-        # Entropy Regularization to prevent mode collapse
+        # Entropy Regularization scaled dynamically based on target variance
         # entropy = -sum(pi * log(pi))
         entropy_penalty = torch.sum(pi * torch.log(pi + 1e-10), dim=1) 
-        loss = loss + entropy_weight * entropy_penalty
+        loss = loss + (entropy_weight * dynamic_scale) * entropy_penalty
     
     return torch.mean(loss)
 
