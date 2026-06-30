@@ -103,11 +103,18 @@ class TrainManager:
 
     def _start_uploader_worker(self) -> None:
         """Start a background daemon thread that processes S3 upload requests sequentially.
-        This completely decouples checkpoints uploads from the training loop, preventing DDP stalls.
+
+        This completely decouples checkpoint uploads from the training loop,
+        preventing DDP stalls.  Each upload is retried with exponential backoff
+        up to MAX_UPLOAD_RETRIES times.  If all retries fail, the thread logs
+        the error and continues processing the next upload—it never crashes
+        silently, which would cause the training loop to hang on queue.put().
         """
         s3_bucket = self.config.get("s3_bucket")
         if not s3_bucket or not self._is_rank_zero():
             return
+
+        MAX_UPLOAD_RETRIES = 3
 
         def uploader_loop():
             try:
@@ -124,14 +131,36 @@ class TrainManager:
                     break
                 
                 local_path, bucket, key = task
-                try:
-                    logger.debug(f"Uploading checkpoint in background: {key}...")
-                    s3.upload_file(local_path, bucket, key)
-                    logger.debug(f"Resume checkpoint synced to s3://{bucket}/{key}")
-                except Exception as e:
-                    logger.warning(f"Failed to sync checkpoint to S3: {e}")
-                finally:
-                    self._upload_queue.task_done()
+                uploaded = False
+                for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
+                    try:
+                        logger.debug(f"Uploading checkpoint in background: {key} (attempt {attempt}/{MAX_UPLOAD_RETRIES})...")
+                        s3.upload_file(local_path, bucket, key)
+                        logger.debug(f"Resume checkpoint synced to s3://{bucket}/{key}")
+                        uploaded = True
+                        break
+                    except Exception as e:
+                        wait_seconds = min(2 ** attempt, 30)
+                        logger.warning(
+                            f"S3 upload attempt {attempt}/{MAX_UPLOAD_RETRIES} failed for {key}: {e}. "
+                            f"Retrying in {wait_seconds}s..."
+                        )
+                        import time as _time
+                        _time.sleep(wait_seconds)
+                        # Refresh boto3 client on credential/connection errors
+                        try:
+                            import boto3 as _boto3
+                            s3 = _boto3.client('s3')
+                        except Exception:
+                            pass
+
+                if not uploaded:
+                    logger.error(
+                        f"FAILED to upload checkpoint {key} after {MAX_UPLOAD_RETRIES} retries. "
+                        "Continuing to next upload task — training loop will NOT hang."
+                    )
+
+                self._upload_queue.task_done()
 
         self._uploader_thread = threading.Thread(target=uploader_loop, daemon=True)
         self._uploader_thread.start()

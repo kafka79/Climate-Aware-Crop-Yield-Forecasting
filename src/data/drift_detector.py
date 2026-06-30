@@ -135,12 +135,19 @@ def _extract_ndvi(zarr_path: Path, years: Optional[List[int]] = None) -> Optiona
     return None
 
 
-def _extract_weather_feature(zarr_path: Path, variable: str = "t2m", years: Optional[List[int]] = None) -> Optional[np.ndarray]:
+def _extract_weather_feature(zarr_path: Path, variable: str = "t2m", years: Optional[List[int]] = None,
+                             resolution_mode: str = "balanced") -> Optional[np.ndarray]:
     """Extract a scalar weather variable from a Zarr weather feature store.
 
     Applies lazy slicing before calling compute() to avoid OOM risks,
     and preserves spatial variance to avoid statistical blindness.
     """
+    RESOLUTION_PRESETS = {
+        "fast": 100_000,
+        "balanced": 500_000,
+        "full": float("inf"),
+    }
+    max_points = RESOLUTION_PRESETS.get(resolution_mode, RESOLUTION_PRESETS["balanced"])
     try:
         import xarray as xr
         ds = xr.open_zarr(zarr_path)
@@ -156,12 +163,11 @@ def _extract_weather_feature(zarr_path: Path, variable: str = "t2m", years: Opti
 
         if variable in ds:
             # Memory safety: dynamic coordinate striding BEFORE computation to prevent OOM
-            max_points = 100_000
             spatial_dims = [dim for dim in ds.dims if dim in ("lat", "lon")]
             num_spatial = len(spatial_dims)
             
             slices = {}
-            if num_spatial > 0:
+            if num_spatial > 0 and max_points != float("inf"):
                 spatial_shape = [ds.dims[dim] for dim in spatial_dims]
                 total_spatial = np.prod(spatial_shape)
                 if total_spatial > max_points:

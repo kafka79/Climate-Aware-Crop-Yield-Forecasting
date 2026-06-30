@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from typing import Dict, Any, List
 from loguru import logger
 
@@ -9,10 +10,31 @@ try:
 except ImportError:
     HAS_GENAI = False
 
+# Safety blocklist: terms that indicate potentially dangerous agronomic advice.
+# If an LLM recommendation contains any of these, it is rejected and replaced
+# with the heuristic fallback to prevent liability exposure.
+_DANGEROUS_TERMS = re.compile(
+    r"\b("
+    r"paraquat|endosulfan|chlorpyrifos|glyphosate|atrazine|methyl\s*bromide|"
+    r"DDT|aldrin|dieldrin|monocrotophos|"
+    r"(\d{3,})\s*(kg|liters?|gallons?|tons?)\s*(per|/)\s*(hectare|acre|ha)|"
+    r"inject\s+directly|undiluted|maximum\s+dosage|exceed\s+recommended"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_SAFETY_DISCLAIMER = (
+    "⚠️ **Disclaimer:** These recommendations are AI-generated guidance based on "
+    "model outputs. Always consult a certified agronomist before applying any "
+    "chemical treatments, irrigation changes, or fertilizer adjustments."
+)
+
+
 class RecommendationEngine:
     """
     Translates yield forecasts, risk levels, and model attributions into actionable advice.
-    Features a dynamic 'Expert Mode' using LLMs when an API key is provided.
+    Features a dynamic 'Expert Mode' using LLMs when an API key is provided,
+    with structured output validation and safety guardrails.
     """
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -34,9 +56,24 @@ class RecommendationEngine:
             return self._generate_llm_advice(inference_result)
         return self._generate_heuristic_advice(inference_result)
 
+    def _validate_recommendation(self, text: str) -> bool:
+        """Validate a single recommendation against safety blocklist.
+
+        Returns True if the recommendation is safe to display.
+        Returns False if it contains potentially dangerous terms.
+        """
+        if _DANGEROUS_TERMS.search(text):
+            logger.warning(f"BLOCKED unsafe LLM recommendation: {text[:120]}...")
+            return False
+        # Reject empty or suspiciously short recommendations
+        if len(text.strip()) < 10:
+            return False
+        return True
+
     def _generate_llm_advice(self, result: Dict[str, Any]) -> List[str]:
         """
         Uses Gemini to generate a professional agronomic report based on model data.
+        Applies structured output validation and safety guardrails.
         """
         region = result.get("region", "Unknown Region")
         prompt = f"""
@@ -50,14 +87,49 @@ class RecommendationEngine:
         - Risk Level: {result['risk']}
         - Model Attribution (What drove this prediction): {json.dumps(result['attribution'])}
         
-        Format the output as a list of bullet points. Be concise but technical.
-        Mention specific interventions related to the highest attribution factors.
+        SAFETY CONSTRAINTS (MANDATORY):
+        - Do NOT recommend specific pesticide or herbicide brand names.
+        - Do NOT recommend chemical application quantities exceeding standard agronomic guidelines.
+        - Do NOT recommend any banned or restricted-use chemicals.
+        - Keep recommendations actionable but conservative.
+        
+        Format: Return a JSON array of strings, each string being one recommendation.
+        Example: ["Recommendation 1", "Recommendation 2", "Recommendation 3"]
+        Return ONLY the JSON array, no other text.
         """
         try:
             response = self.model.generate_content(prompt)
-            # Split lines and clean up
-            advice = [line.strip("* ").strip("- ") for line in response.text.strip().split("\n") if line.strip()]
-            return advice[:5]
+            raw_text = response.text.strip()
+
+            # Attempt to parse as structured JSON array
+            advice = []
+            try:
+                # Extract JSON array from response (handle markdown code blocks)
+                json_match = re.search(r'\[.*\]', raw_text, re.DOTALL)
+                if json_match:
+                    parsed = json.loads(json_match.group())
+                    if isinstance(parsed, list):
+                        advice = [str(item).strip() for item in parsed if isinstance(item, str)]
+            except (json.JSONDecodeError, TypeError):
+                # Fallback: split by newlines if JSON parsing fails
+                advice = [line.strip("* ").strip("- ") for line in raw_text.split("\n") if line.strip()]
+
+            # Safety validation: reject any recommendations that match dangerous patterns
+            safe_advice = []
+            for rec in advice[:5]:
+                if self._validate_recommendation(rec):
+                    safe_advice.append(rec)
+                else:
+                    logger.warning("Unsafe recommendation rejected, falling back to heuristics for this item.")
+
+            if not safe_advice:
+                logger.warning("All LLM recommendations failed safety validation. Using heuristic fallback.")
+                return self._generate_heuristic_advice(result)
+
+            # Prepend safety disclaimer
+            safe_advice.insert(0, _SAFETY_DISCLAIMER)
+            return safe_advice[:6]
+
         except Exception as e:
             logger.error(f"LLM generation failed: {e}. Falling back to heuristics.")
             return self._generate_heuristic_advice(result)

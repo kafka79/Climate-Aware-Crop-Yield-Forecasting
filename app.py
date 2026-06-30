@@ -107,9 +107,59 @@ hr { border:none; border-top:1px solid #e5e7eb; margin:1.5rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Theme-aware color palette (Flaw 9 fix) ──────────────────────────────────
+# Centralized design tokens instead of ad-hoc hex strings scattered across the file.
+THEME = {
+    "primary": "#16a34a",       # Green — healthy / low-risk / positive
+    "primary_dark": "#14532d",  # Dark green — chart gradient endpoint
+    "primary_light": "#d1fae5", # Light green — chart gradient start / backgrounds
+    "primary_fill": "rgba(22,163,74,0.08)",  # Transparent green for area fills
+    "warning": "#d97706",       # Amber — warnings / forecast markers
+    "warning_bg": "#fef3c7",   # Amber background
+    "danger": "#ef4444",        # Red — critical alerts / high-risk
+    "danger_bg": "#fee2e2",    # Red background
+    "success_bg": "#dcfce7",   # Green background for status pills
+    "text": "#111827",          # Primary text
+    "text_secondary": "#6b7280",  # Muted labels
+    "border": "#e5e7eb",       # Borders / dividers
+    "surface": "#f9fafb",      # Card backgrounds
+    "marker_selected": "#1f2937",  # Map marker — selected region
+    "marker_default": "#9ca3af",   # Map marker — unselected
+}
+
+# ── User-friendly label mapping (Flaw 8 fix) ─────────────────────────────────
+# Maps internal system keys to human-readable labels so the UI never exposes
+# raw model/config terminology to end users.
+LABEL_MAP = {
+    # Attribution modalities
+    "Weather": "🌦️ Weather Influence",
+    "Satellite": "🛰️ Vegetation & Biomass",
+    "Soil": "🌱 Soil Properties",
+    # Status keys
+    "live_ready": "Forecast Ready",
+    "feature_store_ready": "Data Available",
+    "model_ready": "Model Loaded",
+    # Risk levels
+    "LOW": "✅ Low Risk",
+    "MODERATE": "⚠️ Moderate Risk",
+    "HIGH": "🚨 High Risk",
+}
+
+def _friendly(key: str) -> str:
+    """Return the user-friendly label for an internal key, or the key itself."""
+    return LABEL_MAP.get(key, key)
+
+# ── Audience view modes (Flaw 7 fix) ─────────────────────────────────────────
+# Different stakeholders need different information density:
+#   Farmer    → simplified metrics, plain-language advice, no internals
+#   Analyst   → full technical output, attribution charts, GMM diagnostics
+#   Planner   → aggregate trends, risk heatmap, policy-level recommendations
+VIEW_MODES = ["🌾 Farmer", "📊 Analyst", "🏛️ Policy-Maker"]
+
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🌾 Crop Intelligence")
+    view_mode = st.selectbox("View Mode", VIEW_MODES, help="Choose your role to see the most relevant information.")
     region = st.selectbox("Region", REGIONS)
     year = st.selectbox("Year", YEARS if YEARS else [2023])
     
@@ -278,11 +328,15 @@ with left:
 
 with right:
     if prediction:
-        st.subheader("What Drove This Forecast")
-        adf = pd.DataFrame({"Modality": list(prediction["attribution"].keys()), "Score": list(prediction["attribution"].values())}).sort_values("Score")
-        fa = px.bar(adf, x="Score", y="Modality", orientation="h", template="plotly_white", color="Score", color_continuous_scale=["#d1fae5","#16a34a","#14532d"])
-        fa.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False, font=dict(family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"))
-        st.plotly_chart(fa, use_container_width=True)
+        # Attribution chart — use friendly labels (Flaw 8 fix) and theme colors (Flaw 9 fix)
+        if view_mode != "🌾 Farmer":  # Farmers see simplified advice only, not technical attribution
+            st.subheader("What Drove This Forecast")
+            raw_attr = prediction["attribution"]
+            friendly_attr = {_friendly(k): v for k, v in raw_attr.items()}
+            adf = pd.DataFrame({"Factor": list(friendly_attr.keys()), "Impact": list(friendly_attr.values())}).sort_values("Impact")
+            fa = px.bar(adf, x="Impact", y="Factor", orientation="h", template="plotly_white", color="Impact", color_continuous_scale=[THEME["primary_light"], THEME["primary"], THEME["primary_dark"]])
+            fa.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False, font=dict(family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"))
+            st.plotly_chart(fa, use_container_width=True)
 
         st.subheader("Recommendations")
         for adv in prediction.get("recommendations", []):
@@ -326,18 +380,18 @@ else:
         for _, r in mdf.iterrows():
             sel = r["site_id"] == region
             
-            # Map marker color according to deviation from historical average (design tokens: green, amber, red)
+            # Map marker color uses centralized THEME tokens (Flaw 9 fix)
             hist_avg = hist_averages.get(r["site_id"])
             if hist_avg:
                 deviation = (hist_avg - r["yv"]) / hist_avg
                 if deviation > 0.5:
-                    fill_color = "#ef4444"  # Red token (High Risk)
+                    fill_color = THEME["danger"]
                 elif deviation > 0.2:
-                    fill_color = "#f59e0b"  # Amber token (Medium Risk)
+                    fill_color = THEME["warning"]
                 else:
-                    fill_color = "#22c55e"  # Green token (Low Risk)
+                    fill_color = THEME["primary"]
             else:
-                fill_color = "#22c55e"
+                fill_color = THEME["primary"]
                 
             folium.CircleMarker(
                 location=[r["lat"], r["lon"]],

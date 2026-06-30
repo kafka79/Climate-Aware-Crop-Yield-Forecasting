@@ -9,6 +9,13 @@ class MixtureDensityNetwork(nn.Module):
     """
     Mixture Density Network (MDN) for probabilistic yield forecasting.
     Outputs the parameters of a Gaussian Mixture Model (GMM).
+
+    Sigma parameterization uses log-scale: the network outputs raw log_sigma
+    values, which are converted via sigma = softplus(log_sigma) + epsilon.
+    This is mathematically principled — softplus alone allows sigma to approach 0
+    asymptotically (causing NLL explosion), while torch.clamp creates non-differentiable
+    boundaries that distort gradient flow.  The log-scale approach provides smooth,
+    differentiable bounds that the optimizer can traverse cleanly.
     """
     def __init__(self, input_dim: int, num_mixtures: int = 5, output_dim: int = 1):
         super(MixtureDensityNetwork, self).__init__()
@@ -16,17 +23,19 @@ class MixtureDensityNetwork(nn.Module):
         self.num_mixtures = num_mixtures
         self.output_dim = output_dim
         
+        # Minimum sigma floor: prevents variance collapse while staying
+        # small enough not to affect well-behaved distributions
+        self.sigma_min = 1e-4
+
         # MDN Head
         self.pi = nn.Sequential(
             nn.Linear(input_dim, num_mixtures),
             nn.Softmax(dim=1) # Mixing coefficients must sum to 1
         )
-        self.sigma = nn.Sequential(
-            nn.Linear(input_dim, num_mixtures * output_dim),
-            nn.Softplus() # Softplus guarantees sigma > 0
-        )
+        # Log-sigma parameterization: network outputs unconstrained values,
+        # converted to positive sigma via softplus + floor in forward()
+        self.log_sigma = nn.Linear(input_dim, num_mixtures * output_dim)
         self.mu = nn.Linear(input_dim, num_mixtures * output_dim)
-        self.epsilon = 1e-6 # Minimum variance for stability
         
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -35,17 +44,16 @@ class MixtureDensityNetwork(nn.Module):
         returns: (pi, sigma, mu)
         """
         pi = self.pi(x)
-        sigma = self.sigma(x)
+        log_sigma_raw = self.log_sigma(x)
         mu = self.mu(x)
         
-        # Reshape sigma and mu to (B, K, O)
-        sigma = sigma.view(-1, self.num_mixtures, self.output_dim)
+        # Reshape to (B, K, O)
+        log_sigma_raw = log_sigma_raw.view(-1, self.num_mixtures, self.output_dim)
         mu = mu.view(-1, self.num_mixtures, self.output_dim)
         
-        # Enforce strict lower bound to prevent variance collapse and NaN NLL losses.
-        # Softplus alone allows sigma to approach 0 asymptotically, which causes
-        # the -log(sigma) term in the NLL loss to explode.
-        sigma = torch.clamp(sigma, min=1e-3)
+        # Log-scale sigma: softplus provides smooth differentiable lower bound,
+        # sigma_min provides an absolute floor without creating gradient discontinuities
+        sigma = nn.functional.softplus(log_sigma_raw) + self.sigma_min
         
         return pi, sigma, mu
 

@@ -755,11 +755,31 @@ _MODEL_CACHE_LIMIT = 3
 _MODEL_CACHE_LOCK = threading.Lock()
 
 def _get_cached_model(model_path: Path, config: dict) -> torch.nn.Module:
-    path_str = str(model_path.resolve())
+    """Load and cache the model, with mtime-based invalidation.
+
+    The cache key includes the file's modification timestamp so that when a
+    new training run overwrites best_model.pth, the old model is automatically
+    evicted and the new weights are loaded on the next inference call.
+    """
+    resolved = model_path.resolve()
+    path_str = str(resolved)
+    # Include file mtime in the cache key so checkpoint updates invalidate stale entries
+    try:
+        mtime = resolved.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    cache_key = f"{path_str}::{mtime}"
+
     with _MODEL_CACHE_LOCK:
-        if path_str in _MODEL_CACHE:
-            _MODEL_CACHE.move_to_end(path_str)
+        if cache_key in _MODEL_CACHE:
+            _MODEL_CACHE.move_to_end(cache_key)
         else:
+            # Evict any previous versions of the same path (different mtime)
+            stale_keys = [k for k in _MODEL_CACHE if k.startswith(path_str + "::")]
+            for stale_key in stale_keys:
+                del _MODEL_CACHE[stale_key]
+                logger.info(f"Evicted stale model cache entry: {stale_key}")
+
             if len(_MODEL_CACHE) >= _MODEL_CACHE_LIMIT:
                 oldest_key, _ = _MODEL_CACHE.popitem(last=False)
                 logger.info(f"Model cache limit reached. Evicting oldest cached model: {oldest_key}")
@@ -769,8 +789,8 @@ def _get_cached_model(model_path: Path, config: dict) -> torch.nn.Module:
             load_model_weights(model, path_str, device)
             model.to(device)
             model.eval()
-            _MODEL_CACHE[path_str] = model
-        return _MODEL_CACHE[path_str]
+            _MODEL_CACHE[cache_key] = model
+        return _MODEL_CACHE[cache_key]
 
 
 def run_inference(
@@ -825,10 +845,32 @@ def run_inference(
             pi_list = pi[0].cpu().tolist() if pi.dim() > 1 else pi.cpu().tolist()
             sigma_list = sigma[0, :, 0].cpu().tolist() if sigma.dim() > 2 else (sigma[:, 0].cpu().tolist() if sigma.dim() > 1 else sigma.cpu().tolist())
             mu_list = mu[0, :, 0].cpu().tolist() if mu.dim() > 2 else (mu[:, 0].cpu().tolist() if mu.dim() > 1 else mu.cpu().tolist())
+
+            # Build structured multi-hypothesis output (Flaw 11 fix):
+            # Propagate ALL mixture components through the pipeline so downstream
+            # consumers (APIs, dashboards, planners) can reason about each
+            # plausible yield outcome independently, rather than only seeing
+            # the collapsed point estimate.
+            scenarios = []
+            for i, (w, m, s) in enumerate(zip(pi_list, mu_list, sigma_list)):
+                scenarios.append({
+                    "hypothesis_id": i,
+                    "weight": round(w, 4),
+                    "mean_yield": round(m, 3),
+                    "std": round(s, 4),
+                    "ci_lower": round(m - 1.96 * s, 3),
+                    "ci_upper": round(m + 1.96 * s, 3),
+                    "label": f"Scenario {i+1}" + (" (dominant)" if abs(m - predicted_yield) < 0.01 else ""),
+                })
+            # Sort scenarios by weight descending for consumer convenience
+            scenarios.sort(key=lambda x: x["weight"], reverse=True)
+
             gmm_params = {
                 "pi": pi_list,
                 "sigma": sigma_list,
-                "mu": mu_list
+                "mu": mu_list,
+                "scenarios": scenarios,
+                "num_active_scenarios": sum(1 for s in scenarios if s["weight"] > 0.05),
             }
         else:
             predicted_yield = float(output.squeeze().cpu().item())
@@ -933,6 +975,38 @@ def run_inference(
                 "year": str(year)
             })
             logger.info(f"Closed-loop telemetry: calculated MAPE={mape:.2f}%, Absolute Error={absolute_error:.2f} t/ha for {region}:{year}")
+
+            # Automated accuracy degradation detection and alerting
+            mape_alert_threshold = float(config.get("monitoring", {}).get("mape_alert_threshold", 30.0))
+            if mape > mape_alert_threshold:
+                logger.critical(
+                    f"ACCURACY DEGRADATION ALERT: MAPE={mape:.2f}% exceeds threshold "
+                    f"({mape_alert_threshold}%) for {region}:{year}. "
+                    "Investigate feature drift or model staleness immediately."
+                )
+                log_business_metric("accuracy_degradation_alert", mape, "percent", {
+                    "region": region,
+                    "year": str(year),
+                    "threshold": str(mape_alert_threshold),
+                    "alert_level": "CRITICAL",
+                })
+                # Write degradation flag file for CI/CD pipeline and monitoring systems
+                # to detect and trigger automated rollback or retraining workflows
+                degradation_flag_path = Path("models/checkpoints/.accuracy_degraded")
+                try:
+                    degradation_flag_path.parent.mkdir(parents=True, exist_ok=True)
+                    import time as _time
+                    degradation_flag_path.write_text(json.dumps({
+                        "region": region,
+                        "year": year,
+                        "mape": round(mape, 2),
+                        "threshold": mape_alert_threshold,
+                        "timestamp": _time.time(),
+                        "action_required": "retrain_or_rollback",
+                    }, indent=2))
+                    logger.warning(f"Degradation flag written to {degradation_flag_path}")
+                except Exception as flag_exc:
+                    logger.warning(f"Could not write degradation flag: {flag_exc}")
 
         return {
             "region": region,

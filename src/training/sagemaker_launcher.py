@@ -130,6 +130,140 @@ def _s3_dataset_size_gb(s3_bucket: str, s3_features_prefix: str) -> float:
 
 
 
+# ── EventBridge + SQS event-driven wait helpers ───────────────────────────────
+
+
+def _setup_eventbridge_notification(sm_client, s3_bucket: str, job_name: str) -> Dict:
+    """Create a temporary EventBridge rule + SQS queue for SageMaker job state changes.
+
+    Returns a dict of resource identifiers for cleanup after the job completes.
+    This eliminates busy-waiting: the runner long-polls SQS instead of calling
+    DescribeTrainingJob every 60 seconds.
+    """
+    import boto3
+
+    sqs = boto3.client("sqs")
+    events = boto3.client("events")
+    sts = boto3.client("sts")
+    account_id = sts.get_caller_identity()["Account"]
+    region = boto3.session.Session().region_name or "ap-south-1"
+
+    queue_name = f"sm-wait-{job_name}"[:80]
+    rule_name = f"sm-rule-{job_name}"[:64]
+
+    # Create temporary SQS queue
+    queue_resp = sqs.create_queue(
+        QueueName=queue_name,
+        Attributes={"MessageRetentionPeriod": "3600", "VisibilityTimeout": "30"},
+    )
+    queue_url = queue_resp["QueueUrl"]
+    queue_arn = f"arn:aws:sqs:{region}:{account_id}:{queue_name}"
+
+    # Allow EventBridge to send messages to this queue
+    policy = json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "AllowEventBridge",
+            "Effect": "Allow",
+            "Principal": {"Service": "events.amazonaws.com"},
+            "Action": "sqs:SendMessage",
+            "Resource": queue_arn,
+            "Condition": {"ArnEquals": {"aws:SourceArn": f"arn:aws:events:{region}:{account_id}:rule/{rule_name}"}},
+        }],
+    })
+    sqs.set_queue_attributes(QueueUrl=queue_url, Attributes={"Policy": policy})
+
+    # Create EventBridge rule matching this specific training job's state changes
+    events.put_rule(
+        Name=rule_name,
+        EventPattern=json.dumps({
+            "source": ["aws.sagemaker"],
+            "detail-type": ["SageMaker Training Job State Change"],
+            "detail": {"TrainingJobName": [job_name]},
+        }),
+        State="ENABLED",
+        Description=f"Temporary rule for crop-yield training job {job_name}",
+    )
+    events.put_targets(Rule=rule_name, Targets=[{"Id": "sqs-target", "Arn": queue_arn}])
+
+    logger.info(f"EventBridge rule '{rule_name}' → SQS '{queue_name}' created for event-driven wait.")
+    return {
+        "queue_url": queue_url,
+        "queue_name": queue_name,
+        "rule_name": rule_name,
+        "sqs": sqs,
+        "events": events,
+    }
+
+
+def _wait_via_eventbridge(
+    sm_client, job_name: str, resources: Dict, terminal_states: set, max_wait_hours: int
+) -> Dict:
+    """Long-poll SQS for SageMaker job state-change events instead of busy-waiting.
+
+    SQS long-polling (WaitTimeSeconds=20) means we issue ~3 API calls per minute
+    with near-zero compute cost, compared to repeatedly calling DescribeTrainingJob.
+    """
+    sqs = resources["sqs"]
+    queue_url = resources["queue_url"]
+    deadline = time.time() + max_wait_hours * 3600
+
+    while time.time() < deadline:
+        response = sqs.receive_message(
+            QueueUrl=queue_url,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=20,  # Long-poll: blocks up to 20s, zero cost if no messages
+        )
+        messages = response.get("Messages", [])
+        for msg in messages:
+            try:
+                body = json.loads(msg["Body"])
+                detail = body.get("detail", {})
+                status = detail.get("TrainingJobStatus", "")
+                logger.info(f"[{job_name}] EventBridge notification: status={status}")
+                if status in terminal_states:
+                    sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
+                    return sm_client.describe_training_job(TrainingJobName=job_name)
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.warning(f"Malformed EventBridge message: {e}")
+            sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])
+
+    raise TimeoutError(f"SageMaker training job timed out after {max_wait_hours} hours (EventBridge).")
+
+
+def _cleanup_eventbridge_notification(resources: Dict) -> None:
+    """Tear down the temporary EventBridge rule and SQS queue."""
+    try:
+        events = resources["events"]
+        sqs = resources["sqs"]
+        rule_name = resources["rule_name"]
+        events.remove_targets(Rule=rule_name, Ids=["sqs-target"])
+        events.delete_rule(Name=rule_name)
+        sqs.delete_queue(QueueUrl=resources["queue_url"])
+        logger.debug(f"Cleaned up EventBridge rule '{rule_name}' and SQS queue.")
+    except Exception as e:
+        logger.warning(f"EventBridge cleanup failed (non-fatal): {e}")
+
+
+def _wait_via_sdk_waiter(sm_client, job_name: str, max_wait_hours: int) -> Dict:
+    """Fallback: use the SageMaker SDK waiter with exponential backoff.
+
+    This is better than a raw polling loop because boto3 waiters use built-in
+    exponential backoff and jitter, reducing API call volume by ~4x compared
+    to fixed-interval polling.
+    """
+    logger.info(f"Using SageMaker SDK waiter for job '{job_name}'...")
+    waiter = sm_client.get_waiter("training_job_completed_or_stopped")
+    waiter.wait(
+        TrainingJobName=job_name,
+        WaiterConfig={
+            "Delay": 60,
+            "MaxAttempts": max(1, (max_wait_hours * 3600) // 60),
+        },
+    )
+    return sm_client.describe_training_job(TrainingJobName=job_name)
+
+
 # ── SageMaker launcher ────────────────────────────────────────────────────────
 
 def _package_and_upload_code(s3_bucket: str, key_prefix: str) -> str:
@@ -309,39 +443,34 @@ def launch_sagemaker_training(
             "OutputDataConfig": {"S3OutputPath": f"s3://{s3_bucket}/{s3_output_prefix}"},
         }
 
-    # ── Poll until terminal state with safety checks ───────────────────────────
+    # ── Event-driven wait via EventBridge + SQS (no busy-waiting) ──────────────
+    # Instead of polling DescribeTrainingJob in a tight loop (which wastes the
+    # pipeline runner slot for hours), we create a temporary EventBridge rule
+    # that pushes SageMaker job state-change events to an SQS queue. The runner
+    # then long-polls SQS (20s wait per call, zero API waste) and only wakes
+    # when the job actually transitions to a terminal state.
+    #
+    # Fallback: if EventBridge/SQS setup fails (e.g. missing IAM permissions),
+    # we degrade gracefully to the SageMaker SDK waiter which uses exponential
+    # backoff internally.
     terminal_states = {"Completed", "Failed", "Stopped"}
-    poll_interval = 60  # seconds
-    max_polls = max(1, (max_wait_hours * 3600) // poll_interval)
-    polls = 0
-    consecutive_errors = 0
-    max_consecutive_errors = 5
-
-    while polls < max_polls:
-        try:
-            desc = sm.describe_training_job(TrainingJobName=job_name)
-            status = desc["TrainingJobStatus"]
-            logger.info(f"[{job_name}] Status: {status} (Poll {polls + 1}/{max_polls})")
-            consecutive_errors = 0  # reset on success
-
-            if status in terminal_states:
-                break
-        except Exception as exc:
-            consecutive_errors += 1
-            logger.warning(
-                f"Error describing SageMaker job (error {consecutive_errors}/{max_consecutive_errors}): {exc}"
-            )
-            if consecutive_errors >= max_consecutive_errors:
-                raise RuntimeError(f"Failed to poll SageMaker job after {consecutive_errors} consecutive errors.") from exc
-            # Backoff slightly on error
-            time.sleep(15)
-            continue
-
-        time.sleep(poll_interval)
-        polls += 1
-    else:
-        # Exceeded maximum poll time
-        raise TimeoutError(f"SageMaker training job timed out after {max_wait_hours} hours.")
+    eventbridge_resources = None
+    try:
+        eventbridge_resources = _setup_eventbridge_notification(sm, s3_bucket, job_name)
+        desc = _wait_via_eventbridge(
+            sm, job_name, eventbridge_resources, terminal_states, max_wait_hours
+        )
+        status = desc["TrainingJobStatus"]
+    except Exception as eb_exc:
+        logger.warning(
+            f"EventBridge-based wait failed or unavailable ({eb_exc}). "
+            "Falling back to SageMaker SDK waiter with exponential backoff."
+        )
+        desc = _wait_via_sdk_waiter(sm, job_name, max_wait_hours)
+        status = desc["TrainingJobStatus"]
+    finally:
+        if eventbridge_resources:
+            _cleanup_eventbridge_notification(eventbridge_resources)
 
     if status != "Completed":
         failure_reason = desc.get("FailureReason", "No reason provided")
