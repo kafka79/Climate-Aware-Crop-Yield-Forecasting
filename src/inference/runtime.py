@@ -1,4 +1,5 @@
 import os
+import time as _time_module
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -209,6 +210,21 @@ class SafeCacheSerializer:
         header_bytes = data[4:4+header_len]
         binary_block = data[4+header_len:]
         
+        def _validate_bounds(offset: int, length: int, context: str = "") -> None:
+            """Validate that offset+length fits within the binary payload.
+
+            Without this check, a truncated Redis cache entry causes
+            np.frombuffer to silently return fewer bytes than expected,
+            producing a ValueError on reshape or corrupt tensor data.
+            """
+            available = len(binary_block)
+            if offset + length > available:
+                raise ValueError(
+                    f"Truncated cache payload{' (' + context + ')' if context else ''}: "
+                    f"need {offset + length} bytes but binary block has only {available}. "
+                    "The cached entry may be corrupted or partially evicted."
+                )
+        
         parsed = json.loads(header_bytes.decode('utf-8'))
         deserialized = {}
         
@@ -224,6 +240,7 @@ class SafeCacheSerializer:
                     if length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
                     if not (np.issubdtype(dtype, np.number) or dtype == bool or np.issubdtype(dtype, np.datetime64)):
                         raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
+                    _validate_bounds(offset, length, f"torch.Tensor key={k}")
                     
                     arr = np.frombuffer(binary_block[offset:offset+length], dtype=dtype).reshape(shape).copy()
                     dtype_map = {"float32": torch.float32, "float64": torch.float64, "int64": torch.int64}
@@ -240,6 +257,7 @@ class SafeCacheSerializer:
                         if length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
                         if not (np.issubdtype(dtype, np.number) or dtype == bool or np.issubdtype(dtype, np.datetime64)):
                             raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
+                        _validate_bounds(offset, length, f"xr.Dataset data_var={name}")
                         
                         arr = np.frombuffer(binary_block[offset:offset+length], dtype=dtype).reshape(shape).copy()
                         data_vars[name] = (val["dims"], arr)
@@ -254,6 +272,7 @@ class SafeCacheSerializer:
                         if length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
                         if not (np.issubdtype(dtype, np.number) or dtype == bool or np.issubdtype(dtype, np.datetime64)):
                             raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
+                        _validate_bounds(offset, length, f"xr.Dataset coord={name}")
                         
                         arr = np.frombuffer(binary_block[offset:offset+length], dtype=dtype).reshape(shape).copy()
                         coords[name] = (val["dims"], arr)
@@ -273,6 +292,7 @@ class SafeCacheSerializer:
                     if length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
                     if not (np.issubdtype(dtype, np.number) or dtype == bool or np.issubdtype(dtype, np.datetime64)):
                         raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
+                    _validate_bounds(offset, length, f"xr.DataArray values key={k}")
                     
                     values_arr = np.frombuffer(binary_block[offset:offset+length], dtype=dtype).reshape(shape).copy()
                     
@@ -286,6 +306,7 @@ class SafeCacheSerializer:
                         if c_length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
                         if not (np.issubdtype(c_dtype, np.number) or c_dtype == bool or np.issubdtype(c_dtype, np.datetime64)):
                             raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
+                        _validate_bounds(c_offset, c_length, f"xr.DataArray coord={name}")
                         
                         coords[name] = np.frombuffer(binary_block[c_offset:c_offset+c_length], dtype=c_dtype).reshape(c_shape).copy()
                     
@@ -307,6 +328,7 @@ class SafeCacheSerializer:
                         if length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
                         if not (np.issubdtype(dtype, np.number) or dtype == bool or np.issubdtype(dtype, np.datetime64)):
                             raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
+                        _validate_bounds(offset, length, f"list[torch.Tensor] index={len(tensor_list)}")
                         
                         arr = np.frombuffer(binary_block[offset:offset+length], dtype=dtype).reshape(shape).copy()
                         tensor_list.append(torch.tensor(arr, dtype=torch.float32))
@@ -424,6 +446,14 @@ class MissingSoilDataWarning(UserWarning):
     """Raised when soil data is unavailable and a fallback is used."""
 
 
+# Module-level cache for computed soil medians. Keyed by (soil_dim, exclude_region).
+# TTL = 300 seconds. This prevents re-reading every soil CSV on every inference
+# request — the blocking synchronous I/O that was causing latency spikes on the
+# FastAPI event loop.
+_SOIL_MEDIAN_CACHE: Dict[Tuple, Tuple[float, Optional[np.ndarray]]] = {}
+_SOIL_MEDIAN_TTL_SECONDS = 300
+
+
 def _compute_regional_soil_median(
     config: Dict[str, Any], soil_dim: int, exclude_region: Optional[str] = None
 ) -> Optional[np.ndarray]:
@@ -437,7 +467,29 @@ def _compute_regional_soil_median(
     computing the median.  The previous implementation loaded each CSV's first
     row with .to_numpy(), which silently produced garbage when CSVs had columns
     in different orders (e.g., pH first in one file, nitrogen first in another).
+
+    Performance: Results are cached with a 300-second TTL to avoid blocking
+    the FastAPI event loop with synchronous filesystem reads on every request.
     """
+    cache_key = (soil_dim, exclude_region)
+    now = _time_module.monotonic()
+
+    # Return cached value if still within TTL
+    if cache_key in _SOIL_MEDIAN_CACHE:
+        cached_time, cached_value = _SOIL_MEDIAN_CACHE[cache_key]
+        if now - cached_time < _SOIL_MEDIAN_TTL_SECONDS:
+            return cached_value.copy() if cached_value is not None else None
+
+    # Cache miss or expired — compute from filesystem
+    result = _compute_regional_soil_median_uncached(config, soil_dim, exclude_region)
+    _SOIL_MEDIAN_CACHE[cache_key] = (now, result)
+    return result.copy() if result is not None else None
+
+
+def _compute_regional_soil_median_uncached(
+    config: Dict[str, Any], soil_dim: int, exclude_region: Optional[str] = None
+) -> Optional[np.ndarray]:
+    """Uncached implementation: reads all soil CSVs and computes median."""
     soil_dir = Path(config["paths"]["raw"]["soil"])
     if not soil_dir.exists():
         return None

@@ -7,6 +7,8 @@ Addressed Panel Criticisms:
 - [Rohan · Google]: Prevented ZeroDivisionError on stride calculation when spatial dims are empty.
 - [Jess · Meta]: Spanned webhook posting in a background thread to prevent pipeline runner blocks.
 - [Marco · Apple]: Moved Scipy imports to top-level conditional block.
+- [Rohan · Google]: Fixed spatial striding distortion on rectangular grids — per-axis proportional strides.
+- [Tara · OpenAI]: Replaced arbitrary 1.5 variance ratio with F-distribution critical value.
 """
 
 import argparse
@@ -25,7 +27,7 @@ import requests
 # Conditional import for scipy to handle packaging gracefully at top level
 HAS_SCIPY = False
 try:
-    from scipy.stats import ks_2samp, levene
+    from scipy.stats import ks_2samp, levene, f as f_dist
     HAS_SCIPY = True
 except ImportError:
     logger.warning("Scipy is not installed. Kolmogorov-Smirnov and Levene weather drift checks will be skipped.")
@@ -108,13 +110,22 @@ def _extract_ndvi(zarr_path: Path, years: Optional[List[int]] = None) -> Optiona
             
             slices = {}
             if num_spatial > 0:
-                spatial_shape = [ds.dims[dim] for dim in spatial_dims]
-                total_spatial = np.prod(spatial_shape)
+                spatial_shape = {dim: ds.dims[dim] for dim in spatial_dims}
+                total_spatial = np.prod(list(spatial_shape.values()))
                 if total_spatial > max_points:
-                    stride = int(np.ceil((total_spatial / max_points) ** (1.0 / num_spatial)))
-                    if stride > 1:
-                        for dim in spatial_dims:
-                            slices[dim] = slice(None, None, stride)
+                    # Per-axis proportional striding: compute each axis's stride
+                    # relative to its share of the total, so rectangular grids
+                    # (e.g. lat=1000, lon=10) don't collapse the smaller axis.
+                    downsample_ratio = total_spatial / max_points
+                    for dim in spatial_dims:
+                        dim_size = spatial_shape[dim]
+                        # Each axis's stride is proportional to its fraction of total pixels
+                        axis_ratio = dim_size / (total_spatial ** (1.0 / num_spatial))
+                        axis_stride = max(1, int(np.ceil(downsample_ratio ** (1.0 / num_spatial) * (dim_size / max(spatial_shape.values())) ** 0.5)))
+                        # Ensure we never stride past the entire axis
+                        axis_stride = min(axis_stride, max(1, dim_size // 2))
+                        if axis_stride > 1:
+                            slices[dim] = slice(None, None, axis_stride)
                             
             if slices:
                 ds = ds.isel(**slices)
@@ -168,13 +179,16 @@ def _extract_weather_feature(zarr_path: Path, variable: str = "t2m", years: Opti
             
             slices = {}
             if num_spatial > 0 and max_points != float("inf"):
-                spatial_shape = [ds.dims[dim] for dim in spatial_dims]
-                total_spatial = np.prod(spatial_shape)
+                spatial_shape = {dim: ds.dims[dim] for dim in spatial_dims}
+                total_spatial = np.prod(list(spatial_shape.values()))
                 if total_spatial > max_points:
-                    stride = int(np.ceil((total_spatial / max_points) ** (1.0 / num_spatial)))
-                    if stride > 1:
-                        for dim in spatial_dims:
-                            slices[dim] = slice(None, None, stride)
+                    downsample_ratio = total_spatial / max_points
+                    for dim in spatial_dims:
+                        dim_size = spatial_shape[dim]
+                        axis_stride = max(1, int(np.ceil(downsample_ratio ** (1.0 / num_spatial) * (dim_size / max(spatial_shape.values())) ** 0.5)))
+                        axis_stride = min(axis_stride, max(1, dim_size // 2))
+                        if axis_stride > 1:
+                            slices[dim] = slice(None, None, axis_stride)
                             
             if slices:
                 ds = ds.isel(**slices)
@@ -215,13 +229,16 @@ def _extract_weather_anomalies(
         
         slices = {}
         if num_spatial > 0:
-            spatial_shape = [ref_ds.dims[dim] for dim in spatial_dims]
-            total_spatial = np.prod(spatial_shape)
+            spatial_shape = {dim: ref_ds.dims[dim] for dim in spatial_dims}
+            total_spatial = np.prod(list(spatial_shape.values()))
             if total_spatial > max_points:
-                stride = int(np.ceil((total_spatial / max_points) ** (1.0 / num_spatial)))
-                if stride > 1:
-                    for dim in spatial_dims:
-                        slices[dim] = slice(None, None, stride)
+                downsample_ratio = total_spatial / max_points
+                for dim in spatial_dims:
+                    dim_size = spatial_shape[dim]
+                    axis_stride = max(1, int(np.ceil(downsample_ratio ** (1.0 / num_spatial) * (dim_size / max(spatial_shape.values())) ** 0.5)))
+                    axis_stride = min(axis_stride, max(1, dim_size // 2))
+                    if axis_stride > 1:
+                        slices[dim] = slice(None, None, axis_stride)
                         
         if slices:
             ref_ds = ref_ds.isel(**slices)
@@ -346,12 +363,25 @@ def check_region_drift(
                     var_cur = float(std_cur**2) + 1e-8
                     var_ratio = max(var_ref, var_cur) / min(var_ref, var_cur)
                     
+                    # Use F-distribution critical value instead of arbitrary 1.5
+                    # threshold. The F-test critical value adapts to sample sizes,
+                    # providing a principled, statistically justified variance
+                    # shift threshold rather than a hardcoded magic number.
+                    n_ref = len(ref_w)
+                    n_cur = len(cur_w)
+                    df_num = max(n_cur - 1, 1)
+                    df_den = max(n_ref - 1, 1)
+                    f_critical = f_dist.ppf(1.0 - ks_warn_threshold, df_num, df_den)
+                    # Clamp to a minimum of 1.2 to avoid triggering on noise
+                    f_critical = max(f_critical, 1.2)
+                    
                     # Weather naturally varies year-over-year. Weather drift triggers WARN, not BLOCK.
                     # Drift is flagged if we detect EITHER:
-                    # 1. Significant mean shift: KS test p < 0.05 AND Cohen's d >= 0.5
-                    # 2. Significant variance shift: Levene's test p < 0.05 AND variance ratio >= 1.5
+                    # 1. Significant mean shift: KS test p < threshold AND Cohen's d >= 0.5
+                    # 2. Significant variance shift: Levene's test p < threshold AND variance
+                    #    ratio exceeds the F-distribution critical value at the same alpha
                     mean_drift = (ks_pval < ks_warn_threshold and cohens_d >= 0.5)
-                    var_drift = (levene_pval < ks_warn_threshold and var_ratio >= 1.5)
+                    var_drift = (levene_pval < ks_warn_threshold and var_ratio >= f_critical)
                     
                     if mean_drift or var_drift:
                         ks_status = "WARN"

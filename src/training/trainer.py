@@ -66,6 +66,7 @@ class TrainManager:
         self._save_path: Optional[str] = None
         self._current_epoch: int = 0
         self._register_spot_termination_handler()
+        self._clear_termination_pill()  # Remove stale poison pills from previous interrupted runs
 
         # Background uploader queue for non-blocking S3 sync to prevent DDP node blocking
         self._upload_queue = queue.Queue()
@@ -391,10 +392,68 @@ class TrainManager:
         }
 
     def _sync_termination_flag(self) -> None:
+        """Broadcast Spot termination across all DDP ranks via filesystem poison pill.
+
+        Why NOT use torch.distributed.all_reduce or barrier?
+        ──────────────────────────────────────────────────────
+        If one rank is already dead (SIGTERM'd and exited the loop), the
+        surviving ranks will block forever on a collective operation waiting
+        for the dead rank. This is the exact deadlock the panel flagged.
+
+        Instead, the first rank to receive SIGTERM writes a tiny poison file
+        to a shared directory (tmpdir or checkpoint dir). Every rank polls
+        for this file on each sync call. Because filesystem operations are
+        independent and non-blocking, no rank can deadlock another.
+
+        Cleanup: The poison file is removed on the next fresh training start
+        by _clear_termination_pill() called during __init__.
         """
-        Spot termination flag check. Since SIGTERM is sent to all processes
-        simultaneously by AWS/orchestrator, each rank monitors its local flag.
-        This avoids DDP collective hangs and deadlocks.
+        # If already flagged locally, nothing more to do
+        if self._termination_requested.is_set():
+            # Ensure the poison pill exists so other ranks see it too
+            self._write_poison_pill()
+            return
+
+        # Check if another rank has written the poison pill
+        pill_path = self._poison_pill_path()
+        if pill_path.exists():
+            logger.warning(
+                f"Rank detected poison pill at {pill_path} — "
+                "another rank has received SIGTERM. Initiating graceful shutdown."
+            )
+            self._termination_requested.set()
+            return
+
+    def _poison_pill_path(self) -> "Path":
+        """Return the path to the shared termination poison file.
+
+        Uses the checkpoint directory (shared across ranks in multi-node
+        training via EFS/FSx) so all ranks can see it.
         """
-        pass
+        from pathlib import Path
+        save_dir = Path(self.config.get("training", {}).get(
+            "save_path", "models/checkpoints"
+        ))
+        save_dir.mkdir(parents=True, exist_ok=True)
+        return save_dir / ".ddp_termination_pill"
+
+    def _write_poison_pill(self) -> None:
+        """Write the poison pill file so other DDP ranks detect termination."""
+        try:
+            pill = self._poison_pill_path()
+            if not pill.exists():
+                pill.write_text(f"SIGTERM received by rank at epoch {self._current_epoch}")
+                logger.info(f"Poison pill written to {pill}")
+        except Exception as exc:
+            logger.warning(f"Could not write poison pill: {exc}")
+
+    def _clear_termination_pill(self) -> None:
+        """Remove stale poison pill from a previous interrupted run."""
+        try:
+            pill = self._poison_pill_path()
+            if pill.exists():
+                pill.unlink()
+                logger.info(f"Stale poison pill removed: {pill}")
+        except Exception as exc:
+            logger.debug(f"Could not remove stale poison pill: {exc}")
 

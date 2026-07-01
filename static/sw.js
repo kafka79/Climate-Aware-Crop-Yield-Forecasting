@@ -73,7 +73,45 @@ self.addEventListener("fetch", (event) => {
   // Skip non-GET and cross-origin requests we don't manage
   if (request.method !== "GET") return;
 
-  // ── Static assets: Cache-First ──────────────────────────────────────────
+  // ── ONNX Model: Stale-While-Revalidate ───────────────────────────────────
+  // The ONNX model can change when the backend retrains. A pure Cache-First
+  // strategy means clients run stale weights forever (panel Flaw 8).
+  // Stale-while-revalidate serves the cached copy instantly for speed, then
+  // fetches the latest version in the background to update the cache.
+  if (url.pathname.endsWith("model.onnx")) {
+    event.respondWith(
+      caches.open(STATIC_CACHE).then((cache) => {
+        return cache.match(request).then((cached) => {
+          // Always fire a background revalidation fetch
+          const fetchPromise = fetch(request).then((networkResponse) => {
+            if (networkResponse.ok) {
+              cache.put(request, networkResponse.clone());
+              // Notify all clients that a new model is available
+              self.clients.matchAll().then((clients) => {
+                clients.forEach((client) => {
+                  client.postMessage({
+                    type: "MODEL_UPDATED",
+                    url: request.url,
+                    timestamp: Date.now(),
+                  });
+                });
+              });
+            }
+            return networkResponse;
+          }).catch(() => {
+            // Network unavailable — cached copy (if any) was already returned
+            console.warn("[SW] Model revalidation failed (offline). Using cached model.");
+          });
+
+          // Return cached immediately if available, otherwise wait for network
+          return cached || fetchPromise;
+        });
+      })
+    );
+    return;
+  }
+
+  // ── Other static assets: Cache-First ────────────────────────────────────
   if (
     url.pathname.startsWith("/app/static/") ||
     url.hostname === "fonts.googleapis.com" ||

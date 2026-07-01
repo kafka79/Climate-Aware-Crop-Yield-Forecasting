@@ -129,6 +129,122 @@ def _s3_dataset_size_gb(s3_bucket: str, s3_features_prefix: str) -> float:
     return total_bytes / (1024 ** 3)
 
 
+# ── Orphaned resource garbage collection ──────────────────────────────────────
+
+def _cleanup_orphaned_resources(max_age_seconds: int = 7200) -> None:
+    """Delete orphaned SQS queues and EventBridge rules from previous crashed runs.
+
+    If a pipeline runner is killed (OOM, spot termination, network split) before
+    _cleanup_eventbridge_notification runs, the temporary SQS queue and EventBridge
+    rule are leaked. Over time this accumulates hundreds of dead resources.
+
+    This function runs before each new job and removes any resources matching our
+    naming convention ('sm-wait-*' / 'sm-rule-*') that are older than max_age_seconds.
+    """
+    try:
+        import boto3
+        sqs = boto3.client("sqs")
+        events = boto3.client("events")
+
+        # Clean orphaned SQS queues
+        try:
+            resp = sqs.list_queues(QueueNamePrefix="sm-wait-")
+            for queue_url in resp.get("QueueUrls", []):
+                try:
+                    attrs = sqs.get_queue_attributes(
+                        QueueUrl=queue_url,
+                        AttributeNames=["CreatedTimestamp"]
+                    )
+                    created_ts = int(attrs["Attributes"].get("CreatedTimestamp", "0"))
+                    age_seconds = time.time() - created_ts
+                    if age_seconds > max_age_seconds:
+                        sqs.delete_queue(QueueUrl=queue_url)
+                        logger.info(f"GC: Deleted orphaned SQS queue (age={age_seconds/3600:.1f}h): {queue_url}")
+                except Exception as q_exc:
+                    logger.debug(f"GC: Could not inspect/delete queue {queue_url}: {q_exc}")
+        except Exception as list_exc:
+            logger.debug(f"GC: Could not list SQS queues: {list_exc}")
+
+        # Clean orphaned EventBridge rules
+        try:
+            rules = events.list_rules(NamePrefix="sm-rule-").get("Rules", [])
+            for rule in rules:
+                rule_name = rule["Name"]
+                # EventBridge rules don't have a created timestamp, so check if the
+                # corresponding SQS queue still exists. If not, the rule is orphaned.
+                try:
+                    targets = events.list_targets_by_rule(Rule=rule_name).get("Targets", [])
+                    events.remove_targets(Rule=rule_name, Ids=[t["Id"] for t in targets])
+                    events.delete_rule(Name=rule_name)
+                    logger.info(f"GC: Deleted orphaned EventBridge rule: {rule_name}")
+                except Exception as rule_exc:
+                    logger.debug(f"GC: Could not delete rule {rule_name}: {rule_exc}")
+        except Exception as rules_exc:
+            logger.debug(f"GC: Could not list EventBridge rules: {rules_exc}")
+
+    except Exception as gc_exc:
+        # GC is best-effort — never block the main job
+        logger.debug(f"GC: Orphaned resource cleanup failed (non-fatal): {gc_exc}")
+
+
+# ── Training memory footprint estimator ───────────────────────────────────────
+
+def _estimate_training_memory_gb(
+    dataset_inmemory_gb: float,
+    model_param_count: int = 10_000_000,  # ~10M params default for multi-modal model
+    batch_size: int = 32,
+    sequence_length: int = 24,
+    num_features: int = 128,
+    mixed_precision: bool = True,
+) -> float:
+    """Estimate total GPU memory needed for a training run in GiB.
+
+    Accounts for:
+    - Model parameters (4 bytes/param for fp32, 2 bytes for fp16)
+    - Optimizer states (Adam uses 2× param memory for momentum + variance)
+    - Gradients (same size as parameters)
+    - Activation memory (proportional to batch_size × seq_len × features)
+    - Dataset batch memory (one batch in GPU RAM)
+    - Framework overhead (~500MB)
+
+    This replaces the naive 'dataset_size > threshold' comparison that was
+    flagged by the panel: a 10GB dataset with lazy batching fits easily in
+    16GB GPU RAM, while a 2GB dataset with a large model might not.
+    """
+    bytes_per_param = 2.0 if mixed_precision else 4.0
+
+    # Model weights
+    model_mem_gb = (model_param_count * bytes_per_param) / (1024 ** 3)
+
+    # Optimizer states (Adam: 2 extra copies of params in fp32)
+    optimizer_mem_gb = (model_param_count * 4.0 * 2) / (1024 ** 3)
+
+    # Gradients (same dtype as params)
+    gradient_mem_gb = model_mem_gb
+
+    # Activation memory (rough estimate: batch × seq × features × 4 bytes × layer_factor)
+    layer_factor = 12  # typical for transformer-like architectures
+    activation_mem_gb = (
+        batch_size * sequence_length * num_features * 4.0 * layer_factor
+    ) / (1024 ** 3)
+
+    # Per-batch dataset memory
+    # Estimate: batch_size × (sat_features + weather_features + soil_features) × 4 bytes
+    per_sample_bytes = (sequence_length * num_features + sequence_length * 8 + 3) * 4.0
+    batch_mem_gb = (batch_size * per_sample_bytes) / (1024 ** 3)
+
+    # Framework overhead (CUDA context, cuDNN workspace, etc.)
+    overhead_gb = 0.5
+
+    total = model_mem_gb + optimizer_mem_gb + gradient_mem_gb + activation_mem_gb + batch_mem_gb + overhead_gb
+
+    logger.info(
+        f"Memory estimate: model={model_mem_gb:.2f}G, optimizer={optimizer_mem_gb:.2f}G, "
+        f"gradients={gradient_mem_gb:.2f}G, activations={activation_mem_gb:.2f}G, "
+        f"batch={batch_mem_gb:.2f}G, overhead={overhead_gb:.1f}G → total={total:.2f}G"
+    )
+    return total
+
 
 # ── EventBridge + SQS event-driven wait helpers ───────────────────────────────
 
@@ -139,7 +255,12 @@ def _setup_eventbridge_notification(sm_client, s3_bucket: str, job_name: str) ->
     Returns a dict of resource identifiers for cleanup after the job completes.
     This eliminates busy-waiting: the runner long-polls SQS instead of calling
     DescribeTrainingJob every 60 seconds.
+
+    Runs orphaned resource garbage collection first to prevent accumulation of
+    leaked resources from previously crashed pipeline runs.
     """
+    # GC: clean up any orphaned resources from previous crashed runs
+    _cleanup_orphaned_resources()
     import boto3
 
     sqs = boto3.client("sqs")
@@ -529,16 +650,24 @@ def main() -> None:
             logger.error("Local features dir missing/empty, and no S3 bucket specified. Cannot determine dataset size.")
             sys.exit(1)
 
-    if size_gb < args.threshold_gb:
+    # ── Dispatch decision: memory-aware instead of raw dataset size ────────────
+    # The panel flagged that raw dataset size is meaningless for dispatch —
+    # a 10GB dataset with lazy batching fits easily in 16GB GPU RAM, while a
+    # smaller dataset with a large model might not. We now estimate actual
+    # training memory footprint and compare against available GPU memory.
+    LOCAL_GPU_MEMORY_GB = float(os.getenv("LOCAL_GPU_MEMORY_GB", "16.0"))
+    estimated_mem = _estimate_training_memory_gb(dataset_inmemory_gb=size_gb)
+    
+    if estimated_mem < LOCAL_GPU_MEMORY_GB:
         if not features_dir.exists():
             logger.error(
-                f"Dataset size ({size_gb:.2f} GiB) is below SageMaker threshold ({args.threshold_gb} GiB), "
-                "requiring local training, but local features dir does not exist!"
+                f"Estimated training memory ({estimated_mem:.2f} GiB) fits local GPU "
+                f"({LOCAL_GPU_MEMORY_GB:.0f} GiB), but local features dir does not exist!"
             )
             sys.exit(1)
         logger.info(
-            f"Dataset ({size_gb:.2f} GiB) is below the SageMaker threshold "
-            f"({args.threshold_gb} GiB). Signal: train on GitHub runner."
+            f"Estimated training memory ({estimated_mem:.2f} GiB) fits within local GPU "
+            f"({LOCAL_GPU_MEMORY_GB:.0f} GiB). Signal: train on GitHub runner."
         )
         sys.exit(2)  # caller interprets 2 = train locally
 
@@ -551,8 +680,8 @@ def main() -> None:
         sys.exit(1)
 
     logger.warning(
-        f"Dataset ({size_gb:.2f} GiB) exceeds threshold. "
-        "Dispatching to AWS SageMaker instead of GitHub runner."
+        f"Estimated training memory ({estimated_mem:.2f} GiB) exceeds local GPU capacity "
+        f"({LOCAL_GPU_MEMORY_GB:.0f} GiB). Dispatching to AWS SageMaker."
     )
 
     try:
