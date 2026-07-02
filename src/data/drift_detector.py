@@ -38,11 +38,29 @@ _ALERT_THREAD: Optional[threading.Thread] = None
 
 # ── PSI ──────────────────────────────────────────────────────────────────────
 
-def _psi(reference: np.ndarray, current: np.ndarray, bins: int = 10) -> float:
+def _psi(reference: np.ndarray, current: np.ndarray, bins: int = None) -> float:
     """Population Stability Index between two 1-D numeric arrays.
 
     PSI = Σ (actual% - expected%) * ln(actual% / expected%)
+
+    When bins is None (default), the number of bins is selected adaptively
+    using the Freedman-Diaconis rule on the reference distribution, clamped
+    to [5, 50].  This prevents high-variance PSI on small spatial subsets
+    (where 10 bins create noisy histograms) and over-smoothing on large
+    datasets (where 10 bins lose distributional resolution).
     """
+    if bins is None:
+        # Freedman-Diaconis: bin_width = 2 * IQR * n^(-1/3)
+        n = len(reference)
+        q75, q25 = np.percentile(reference, [75, 25])
+        iqr = q75 - q25
+        ref_range = reference.max() - reference.min()
+        if iqr > 0 and ref_range > 0:
+            bin_width = 2.0 * iqr * (n ** (-1.0 / 3.0))
+            bins = max(5, min(50, int(np.ceil(ref_range / bin_width))))
+        else:
+            bins = 10  # fallback for zero-variance data
+
     ref_min, ref_max = reference.min(), reference.max()
     
     # If the reference has zero variance, np.linspace will produce identical edges. Add a small delta.

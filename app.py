@@ -104,8 +104,88 @@ h2,h3 { font-weight:600!important; color:#1f2937!important; }
 .advice-item.critical { background:#fef2f2; border-left-color:#ef4444; }
 .stButton>button { min-height:48px; font-weight:600; border-radius:10px; }
 hr { border:none; border-top:1px solid #e5e7eb; margin:1.5rem 0; }
+
+/* ── Flaw C2 Fix: Folium map styling overrides ── */
+/* Override default Leaflet controls to match the Inter/green design system */
+.leaflet-control-zoom a {
+    font-family: 'Inter', sans-serif !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    border-color: #e5e7eb !important;
+    border-radius: 8px !important;
+    width: 32px !important;
+    height: 32px !important;
+    line-height: 32px !important;
+    font-size: 16px !important;
+}
+.leaflet-control-zoom a:hover {
+    background: #f9fafb !important;
+    color: #16a34a !important;
+}
+.leaflet-control-zoom { border-radius: 10px !important; border: 1px solid #e5e7eb !important; overflow: hidden; box-shadow: 0 2px 6px rgba(0,0,0,0.06) !important; }
+.leaflet-control-attribution { font-family: 'Inter', sans-serif !important; font-size: 0.65rem !important; color: #9ca3af !important; background: rgba(255,255,255,0.85) !important; }
+.leaflet-tooltip { font-family: 'Inter', sans-serif !important; font-size: 0.82rem !important; border-radius: 8px !important; padding: 0.4rem 0.8rem !important; border: 1px solid #e5e7eb !important; box-shadow: 0 2px 8px rgba(0,0,0,0.08) !important; }
 </style>
 """, unsafe_allow_html=True)
+
+# ── Flaw C3 Fix: Connection-loss monitor ─────────────────────────────────────
+# Uses st.components.v1.html with a self-contained <script> that monitors
+# Streamlit's WebSocket heartbeat via the documented window.parent mechanism.
+# This replaces the previous brittle st.markdown JS injection that could fail
+# on stream reruns and cause rendering glitches.  The component is rendered
+# once as a zero-height iframe, avoiding interference with the layout.
+import streamlit.components.v1 as components
+
+_CONNECTION_MONITOR_HTML = """
+<div id="conn-banner" style="
+    display:none; position:fixed; top:0; left:0; right:0; z-index:99999;
+    background:rgba(239,68,68,0.95); color:white; text-align:center;
+    padding:10px 16px; font-family:'Inter',sans-serif; font-size:0.88rem;
+    font-weight:600; backdrop-filter:blur(8px); letter-spacing:0.01em;
+">
+    ⚠️ Connection lost — forecast controls are disabled until reconnected.
+</div>
+<script>
+(function() {
+    var banner = document.getElementById('conn-banner');
+    var lastPong = Date.now();
+    var CHECK_INTERVAL = 3000;  // check every 3s
+    var TIMEOUT = 8000;         // consider disconnected after 8s without heartbeat
+
+    // Listen for Streamlit's internal WebSocket messages via postMessage
+    window.addEventListener('message', function(e) {
+        if (e.data && (e.data.type === 'streamlit:render' || e.data.stCommVersion)) {
+            lastPong = Date.now();
+        }
+    });
+
+    setInterval(function() {
+        var elapsed = Date.now() - lastPong;
+        if (elapsed > TIMEOUT) {
+            banner.style.display = 'block';
+            // Disable interactive controls in the parent Streamlit frame
+            try {
+                var parent = window.parent.document;
+                parent.querySelectorAll('button[kind="primary"], select, textarea').forEach(function(el) {
+                    el.disabled = true;
+                    el.style.opacity = '0.4';
+                });
+            } catch(err) { /* cross-origin safety */ }
+        } else {
+            banner.style.display = 'none';
+            try {
+                var parent = window.parent.document;
+                parent.querySelectorAll('button[kind="primary"], select, textarea').forEach(function(el) {
+                    el.disabled = false;
+                    el.style.opacity = '1';
+                });
+            } catch(err) {}
+        }
+    }, CHECK_INTERVAL);
+})();
+</script>
+"""
+components.html(_CONNECTION_MONITOR_HTML, height=0)
 
 # ── Theme-aware color palette (Flaw 9 fix) ──────────────────────────────────
 # Centralized design tokens instead of ad-hoc hex strings scattered across the file.
@@ -202,16 +282,52 @@ st.title(f"{region}")
 st.caption(f"Yield forecast workspace · {year}")
 
 # ── Metrics (THE focal point) ────────────────────────────────────────────────
+# ── Flaw C1 Fix: Audience-aware metric display ──────────────────────────────
+# Farmer mode shows plain-language labels and simple risk indicators that a
+# grower in Burdwan can act on without understanding GMM, attribution, or
+# confidence intervals.  Analyst/Policy-Maker modes retain full technical output.
+
+def _risk_to_farmer_label(risk_str: str) -> str:
+    """Translate technical risk level to plain-language farmer advice."""
+    r = risk_str.lower()
+    if "high" in r:
+        return "🚨 Expect problems — act now"
+    elif "moderate" in r or "medium" in r:
+        return "⚠️ Keep a close watch"
+    return "✅ Looking good"
+
+def _yield_to_farmer_context(predicted: float, historical: float) -> str:
+    """Generate plain-language comparison of predicted vs historical yield."""
+    if historical is None or historical == 0:
+        return "No past data to compare"
+    pct = ((predicted - historical) / historical) * 100
+    if pct > 10:
+        return f"📈 {abs(pct):.0f}% above your usual harvest"
+    elif pct < -10:
+        return f"📉 {abs(pct):.0f}% below your usual harvest"
+    return f"➡️ About the same as usual"
+
 if prediction:
     st.success("Live forecast from checkpoint + processed feature store.")
     if prediction.get("modality_warnings"):
         for warn_msg in prediction["modality_warnings"]:
             st.warning(f"⚠️ {warn_msg}")
-    mc = st.columns(4)
-    mc[0].metric("Predicted Yield", f"{prediction['predicted_yield']:.2f} t/ha")
-    mc[1].metric("95% Confidence", f"{prediction['lower_bound']:.2f} – {prediction['upper_bound']:.2f}")
-    mc[2].metric("Risk Level", prediction["risk"])
-    mc[3].metric("vs. Historical", f"{context['historical_average']:.2f} t/ha" if context["historical_average"] else "n/a")
+
+    if view_mode == "🌾 Farmer":
+        # Farmer-friendly metrics: no math, no jargon
+        mc = st.columns(3)
+        mc[0].metric("Expected Harvest", f"{prediction['predicted_yield']:.1f} tonnes/hectare")
+        mc[1].metric("Outlook", _risk_to_farmer_label(prediction["risk"]))
+        mc[2].metric(
+            "vs. Your Usual",
+            _yield_to_farmer_context(prediction['predicted_yield'], context['historical_average'])
+        )
+    else:
+        mc = st.columns(4)
+        mc[0].metric("Predicted Yield", f"{prediction['predicted_yield']:.2f} t/ha")
+        mc[1].metric("95% Confidence", f"{prediction['lower_bound']:.2f} – {prediction['upper_bound']:.2f}")
+        mc[2].metric("Risk Level", prediction["risk"])
+        mc[3].metric("vs. Historical", f"{context['historical_average']:.2f} t/ha" if context["historical_average"] else "n/a")
 elif context["live_ready"]:
     st.info("Data ready. Press **Run Forecast** to generate a prediction.")
     mc = st.columns(3)
@@ -328,8 +444,39 @@ with left:
 
 with right:
     if prediction:
-        # Attribution chart — use friendly labels (Flaw 8 fix) and theme colors (Flaw 9 fix)
-        if view_mode != "🌾 Farmer":  # Farmers see simplified advice only, not technical attribution
+        if view_mode == "🌾 Farmer":
+            # ── Flaw C1 Fix: Farmer-specific plain-language insight panel ──
+            # Instead of showing attribution charts and mathematical confidence
+            # intervals, the Farmer view surfaces actionable, plain-language
+            # summaries that a grower can act on without technical training.
+            st.subheader("What This Means for You")
+            raw_attr = prediction["attribution"]
+            # Translate attribution to farmer-understandable drivers
+            attr_translations = {
+                "Weather": ("🌦️ Weather conditions", "rainfall, temperature, and humidity patterns"),
+                "Satellite": ("🌿 Crop health from satellite", "how green and healthy your fields look from above"),
+                "Soil": ("🌱 Soil quality", "soil nutrients, pH, and organic content"),
+            }
+            # Find the dominant driver
+            if raw_attr:
+                top_driver = max(raw_attr, key=raw_attr.get)
+                label, explanation = attr_translations.get(top_driver, (top_driver, ""))
+                pct = raw_attr[top_driver] * 100
+                st.markdown(
+                    f'<div class="info-card">'
+                    f'<strong>Main factor affecting your harvest:</strong> {label}<br>'
+                    f'This accounts for about <strong>{pct:.0f}%</strong> of the forecast — '
+                    f'it is based on {explanation}.'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+
+            st.subheader("What You Should Do")
+            for adv in prediction.get("recommendations", []):
+                cc = "critical" if any(k in adv.lower() for k in ["emergency","🚨"]) else "warning" if any(k in adv.lower() for k in ["warning","⚠️","volatility"]) else ""
+                st.markdown(f'<div class="advice-item {cc}">{adv}</div>', unsafe_allow_html=True)
+        else:
+            # Analyst / Policy-Maker: full technical attribution and recommendations
             st.subheader("What Drove This Forecast")
             raw_attr = prediction["attribution"]
             friendly_attr = {_friendly(k): v for k, v in raw_attr.items()}
@@ -338,10 +485,10 @@ with right:
             fa.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False, font=dict(family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"))
             st.plotly_chart(fa, use_container_width=True)
 
-        st.subheader("Recommendations")
-        for adv in prediction.get("recommendations", []):
-            cc = "critical" if any(k in adv.lower() for k in ["emergency","🚨"]) else "warning" if any(k in adv.lower() for k in ["warning","⚠️","volatility"]) else ""
-            st.markdown(f'<div class="advice-item {cc}">{adv}</div>', unsafe_allow_html=True)
+            st.subheader("Recommendations")
+            for adv in prediction.get("recommendations", []):
+                cc = "critical" if any(k in adv.lower() for k in ["emergency","🚨"]) else "warning" if any(k in adv.lower() for k in ["warning","⚠️","volatility"]) else ""
+                st.markdown(f'<div class="advice-item {cc}">{adv}</div>', unsafe_allow_html=True)
     else:
         st.subheader("Getting Started")
         st.markdown('<div class="info-card">This dashboard does not fabricate predictions.<br><br><strong>To see a forecast:</strong><br>1. Select a region with processed data<br>2. Choose a year covered by the feature store<br>3. Press <strong>Run Forecast</strong></div>', unsafe_allow_html=True)

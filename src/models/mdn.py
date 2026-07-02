@@ -88,6 +88,85 @@ class BimodalDistributionWarning(UserWarning):
     """Raised when the MDN output is bimodal and the weighted mean is unreliable."""
 
 
+def _find_modes_gradient_ascent(
+    pi: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    lr: float = 0.05,
+    steps: int = 100,
+    convergence_tol: float = 1e-6,
+) -> List[Tuple[float, "torch.Tensor"]]:
+    """Find modes of a Gaussian Mixture via gradient ascent on log-density.
+
+    Instead of evaluating the GMM PDF on a fixed 1-D grid (which is O(grid_points^D)
+    and fails for multi-output D > 1), this initialises one candidate at each
+    component mean and ascends the log-density surface.  Complexity is O(K * steps)
+    regardless of output dimensionality D, making it the correct algorithm for
+    multi-target forecasting (e.g. yield + water demand + protein content).
+
+    Args:
+        pi:    (K,)    mixing coefficients (summing to 1)
+        sigma: (K, O)  per-component std devs
+        mu:    (K, O)  per-component means
+        lr:    Step size for gradient ascent
+        steps: Maximum ascent iterations per candidate
+        convergence_tol: Early-stop when the position delta < this threshold
+
+    Returns:
+        List of (log_density_value, position_tensor) tuples, one per discovered
+        unique mode, sorted by density descending.  Duplicate modes (converged
+        to within convergence_tol of each other) are merged.
+    """
+    K, O = mu.shape
+    candidates = []
+
+    for k in range(K):
+        if float(pi[k]) < 1e-6:
+            continue
+        # Initialise at component mean
+        y = mu[k].clone().detach().requires_grad_(True)
+
+        for _ in range(steps):
+            # Compute log-density of GMM at y
+            diff = y.unsqueeze(0) - mu  # (K, O)
+            mahal = -0.5 * ((diff / sigma) ** 2).sum(dim=1)  # (K,)
+            log_norm = -O * 0.5 * torch.log(torch.tensor(2.0 * 3.141592653589793)) - sigma.log().sum(dim=1)
+            log_components = torch.log(pi + 1e-10) + log_norm + mahal  # (K,)
+            log_density = torch.logsumexp(log_components, dim=0)
+
+            log_density.backward()
+            with torch.no_grad():
+                grad = y.grad
+                if grad is None:
+                    break
+                step = lr * grad
+                y = (y + step).detach().requires_grad_(True)
+                if float(step.abs().max()) < convergence_tol:
+                    break
+
+        # Evaluate final density
+        with torch.no_grad():
+            diff = y - mu
+            mahal = -0.5 * ((diff / sigma) ** 2).sum(dim=1)
+            log_norm = -O * 0.5 * torch.log(torch.tensor(2.0 * 3.141592653589793)) - sigma.log().sum(dim=1)
+            log_components = torch.log(pi + 1e-10) + log_norm + mahal
+            final_log_density = float(torch.logsumexp(log_components, dim=0).item())
+        candidates.append((final_log_density, y.detach()))
+
+    # Merge duplicates: modes within convergence_tol of each other
+    unique_modes: List[Tuple[float, torch.Tensor]] = []
+    for log_d, pos in sorted(candidates, key=lambda x: x[0], reverse=True):
+        is_duplicate = False
+        for _, existing_pos in unique_modes:
+            if float((pos - existing_pos).abs().max()) < convergence_tol * 10:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            unique_modes.append((log_d, pos))
+
+    return unique_modes
+
+
 def mdn_detect_bimodality_single(
     pi_b: torch.Tensor,
     sigma_b: torch.Tensor,

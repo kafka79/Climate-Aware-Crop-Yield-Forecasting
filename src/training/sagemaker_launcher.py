@@ -131,7 +131,7 @@ def _s3_dataset_size_gb(s3_bucket: str, s3_features_prefix: str) -> float:
 
 # ── Orphaned resource garbage collection ──────────────────────────────────────
 
-def _cleanup_orphaned_resources(max_age_seconds: int = 7200) -> None:
+def _cleanup_orphaned_resources(max_age_seconds: int = None) -> None:
     """Delete orphaned SQS queues and EventBridge rules from previous crashed runs.
 
     If a pipeline runner is killed (OOM, spot termination, network split) before
@@ -140,7 +140,14 @@ def _cleanup_orphaned_resources(max_age_seconds: int = 7200) -> None:
 
     This function runs before each new job and removes any resources matching our
     naming convention ('sm-wait-*' / 'sm-rule-*') that are older than max_age_seconds.
+
+    The default age threshold is derived from MAX_WAIT_HOURS + a 1-hour safety
+    buffer, so a legitimately long training job's resources are never garbage
+    collected prematurely — fixing the race condition where a 4-hour training
+    job's SQS queue was deleted after 2 hours by the hardcoded 7200s default.
     """
+    if max_age_seconds is None:
+        max_age_seconds = (MAX_WAIT_HOURS + 1) * 3600  # derive from config + 1h buffer
     try:
         import boto3
         sqs = boto3.client("sqs")
