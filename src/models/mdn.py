@@ -117,6 +117,9 @@ def _find_modes_gradient_ascent(
         unique mode, sorted by density descending.  Duplicate modes (converged
         to within convergence_tol of each other) are merged.
     """
+    pi = pi.detach()
+    sigma = sigma.detach()
+    mu = mu.detach()
     K, O = mu.shape
     candidates = []
 
@@ -349,11 +352,15 @@ def mdn_detect_bimodality(
         pdf_i = pdf_np[i]
         grid_i = grid_np[i]
         
-        # Find local maxima (peaks) of the continuous PDF
+        # Find local maxima (peaks) via gradient ascent
+        modes_asc = _find_modes_gradient_ascent(
+            pi[i],
+            sigma[i],
+            mu[i]
+        )
         peaks = []
-        for idx in range(1, len(grid_i) - 1):
-            if pdf_i[idx] > pdf_i[idx - 1] and pdf_i[idx] > pdf_i[idx + 1]:
-                peaks.append((float(grid_i[idx]), float(pdf_i[idx])))
+        for log_d, pos in modes_asc:
+            peaks.append((float(pos[0].item()), float(math.exp(log_d))))
 
         # Sort peaks by density value descending
         peaks.sort(key=lambda x: x[1], reverse=True)

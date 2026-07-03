@@ -387,8 +387,12 @@ def check_region_drift(
                     # shift threshold rather than a hardcoded magic number.
                     n_ref = len(ref_w)
                     n_cur = len(cur_w)
-                    df_num = max(n_cur - 1, 1)
-                    df_den = max(n_ref - 1, 1)
+                    if var_cur >= var_ref:
+                        df_num = max(n_cur - 1, 1)
+                        df_den = max(n_ref - 1, 1)
+                    else:
+                        df_num = max(n_ref - 1, 1)
+                        df_den = max(n_cur - 1, 1)
                     f_critical = f_dist.ppf(1.0 - ks_warn_threshold, df_num, df_den)
                     # Clamp to a minimum of 1.2 to avoid triggering on noise
                     f_critical = max(f_critical, 1.2)

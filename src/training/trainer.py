@@ -69,7 +69,7 @@ class TrainManager:
         self._clear_termination_pill()  # Remove stale poison pills from previous interrupted runs
 
         # Background uploader queue for non-blocking S3 sync to prevent DDP node blocking
-        self._upload_queue = queue.Queue()
+        self._upload_queue = queue.Queue(maxsize=10)
         self._uploader_thread = None
         self._start_uploader_worker()
 
