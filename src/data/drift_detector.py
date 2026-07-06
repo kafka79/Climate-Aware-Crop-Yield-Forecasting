@@ -288,6 +288,12 @@ def _extract_weather_anomalies(
             ref_anom_da = ref_ds[variable].groupby("time.dt.dayofyear") - climatology
             cur_anom_da = cur_ds[variable].groupby("time.dt.dayofyear") - climatology
             
+            # Average over spatial dimensions to get regional mean time series of anomalies
+            # and avoid spatial autocorrelation inflation of sample size in statistical tests
+            if spatial_dims:
+                ref_anom_da = ref_anom_da.mean(dim=spatial_dims)
+                cur_anom_da = cur_anom_da.mean(dim=spatial_dims)
+
             # Resample along time dimension to weekly mean to resolve temporal autocorrelation (satisfying IID K-S assumptions)
             if "time" in ref_anom_da.coords:
                 ref_anom_da = ref_anom_da.resample(time="1W").mean()

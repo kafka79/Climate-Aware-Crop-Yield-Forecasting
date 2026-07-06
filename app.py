@@ -82,49 +82,116 @@ if "offline_features_generated" not in st.session_state:
     st.session_state["offline_features_generated"] = True
 
 # ── Apple-grade Design System ────────────────────────────────────────────────
-# White canvas, Inter font, high-contrast for outdoor screens, zero noise.
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-[data-testid="stAppViewContainer"] { background:#fff; font-family:'Inter',sans-serif; }
-[data-testid="stSidebar"] { background:#fafafa; border-right:1px solid #e5e7eb; }
-h1 { font-weight:700!important; color:#111827!important; letter-spacing:-0.02em; }
-h2,h3 { font-weight:600!important; color:#1f2937!important; }
-[data-testid="stMetric"] { background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; padding:1rem; }
-[data-testid="stMetricValue"] { font-size:1.5rem!important; font-weight:700!important; color:#111827!important; }
-[data-testid="stMetricLabel"] { font-size:0.78rem!important; font-weight:500!important; color:#6b7280!important; text-transform:uppercase; letter-spacing:0.04em; }
-.status-pill { display:inline-block; padding:0.3rem 0.8rem; border-radius:100px; font-size:0.82rem; font-weight:600; }
-.status-pill.green { background:#dcfce7; color:#166534; }
-.status-pill.amber { background:#fef3c7; color:#92400e; }
-.status-pill.red { background:#fee2e2; color:#991b1b; }
-.info-card { background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; padding:1rem; margin:0.5rem 0; font-size:0.88rem; line-height:1.6; color:#374151; }
-.info-card strong { color:#111827; }
-.advice-item { background:#f0fdf4; border-left:3px solid #22c55e; border-radius:0 8px 8px 0; padding:0.7rem 1rem; margin:0.4rem 0; font-size:0.9rem; color:#1f2937; }
-.advice-item.warning { background:#fffbeb; border-left-color:#f59e0b; }
-.advice-item.critical { background:#fef2f2; border-left-color:#ef4444; }
-.stButton>button { min-height:48px; font-weight:600; border-radius:10px; }
-hr { border:none; border-top:1px solid #e5e7eb; margin:1.5rem 0; }
+# High-contrast, dynamic light/dark/auto themes for field readability.
+theme_selection = st.session_state.get("theme_mode", "Auto/System")
 
-/* ── Flaw C2 Fix: Folium map styling overrides ── */
-/* Override default Leaflet controls to match the Inter/green design system */
-.leaflet-control-zoom a {
+if theme_selection == "High-Contrast Light":
+    css_vars = """
+    :root {
+        --bg-app: #ffffff;
+        --bg-sidebar: #fafafa;
+        --bg-card: #f9fafb;
+        --text-primary: #111827;
+        --text-secondary: #374151;
+        --text-muted: #6b7280;
+        --border-color: #e5e7eb;
+        --leaflet-bg: #ffffff;
+        --leaflet-hover: #f9fafb;
+        --leaflet-text: #111827;
+    }
+    """
+    is_dark = False
+elif theme_selection == "High-Contrast Dark":
+    css_vars = """
+    :root {
+        --bg-app: #0f172a;
+        --bg-sidebar: #1e293b;
+        --bg-card: #1e293b;
+        --text-primary: #f8fafc;
+        --text-secondary: #cbd5e1;
+        --text-muted: #94a3b8;
+        --border-color: #334155;
+        --leaflet-bg: #1e293b;
+        --leaflet-hover: #334155;
+        --leaflet-text: #f8fafc;
+    }
+    """
+    is_dark = True
+else: # Auto/System
+    css_vars = """
+    :root {
+        --bg-app: #ffffff;
+        --bg-sidebar: #fafafa;
+        --bg-card: #f9fafb;
+        --text-primary: #111827;
+        --text-secondary: #374151;
+        --text-muted: #6b7280;
+        --border-color: #e5e7eb;
+        --leaflet-bg: #ffffff;
+        --leaflet-hover: #f9fafb;
+        --leaflet-text: #111827;
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg-app: #0f172a;
+            --bg-sidebar: #1e293b;
+            --bg-card: #1e293b;
+            --text-primary: #f8fafc;
+            --text-secondary: #cbd5e1;
+            --text-muted: #94a3b8;
+            --border-color: #334155;
+            --leaflet-bg: #1e293b;
+            --leaflet-hover: #334155;
+            --leaflet-text: #f8fafc;
+        }
+    }
+    """
+    is_dark = False
+
+plotly_template = "plotly_dark" if is_dark else "plotly_white"
+
+st.markdown(f"""
+<style>
+{css_vars}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+[data-testid="stAppViewContainer"] {{ background: var(--bg-app) !important; font-family:'Inter',sans-serif; color: var(--text-primary) !important; }}
+[data-testid="stSidebar"] {{ background: var(--bg-sidebar) !important; border-right:1px solid var(--border-color); }}
+h1 {{ font-weight:700!important; color: var(--text-primary)!important; letter-spacing:-0.02em; }}
+h2,h3 {{ font-weight:600!important; color: var(--text-secondary)!important; }}
+[data-testid="stMetric"] {{ background: var(--bg-card) !important; border:1px solid var(--border-color) !important; border-radius:12px; padding:1rem; }}
+[data-testid="stMetricValue"] {{ font-size:1.5rem!important; font-weight:700!important; color: var(--text-primary)!important; }}
+[data-testid="stMetricLabel"] {{ font-size:0.78rem!important; font-weight:500!important; color: var(--text-muted)!important; text-transform:uppercase; letter-spacing:0.04em; }}
+.status-pill {{ display:inline-block; padding:0.3rem 0.8rem; border-radius:100px; font-size:0.82rem; font-weight:600; }}
+.status-pill.green {{ background:#dcfce7; color:#166534; }}
+.status-pill.amber {{ background:#fef3c7; color:#92400e; }}
+.status-pill.red {{ background:#fee2e2; color:#991b1b; }}
+.info-card {{ background: var(--bg-card) !important; border:1px solid var(--border-color) !important; border-radius:12px; padding:1rem; margin:0.5rem 0; font-size:0.88rem; line-height:1.6; color: var(--text-secondary) !important; }}
+.info-card strong {{ color: var(--text-primary) !important; }}
+.advice-item {{ background:#f0fdf4; border-left:3px solid #22c55e; border-radius:0 8px 8px 0; padding:0.7rem 1rem; margin:0.4rem 0; font-size:0.9rem; color: var(--text-primary) !important; }}
+.advice-item.warning {{ background:#fffbeb; border-left-color:#f59e0b; }}
+.advice-item.critical {{ background:#fef2f2; border-left-color:#ef4444; }}
+.stButton>button {{ min-height:48px; font-weight:600; border-radius:10px; }}
+hr {{ border:none; border-top:1px solid var(--border-color); margin:1.5rem 0; }}
+
+/* Leaflet overrides */
+.leaflet-control-zoom a {{
     font-family: 'Inter', sans-serif !important;
-    background: #ffffff !important;
-    color: #111827 !important;
-    border-color: #e5e7eb !important;
+    background: var(--leaflet-bg) !important;
+    color: var(--leaflet-text) !important;
+    border-color: var(--border-color) !important;
     border-radius: 8px !important;
     width: 32px !important;
     height: 32px !important;
     line-height: 32px !important;
     font-size: 16px !important;
-}
-.leaflet-control-zoom a:hover {
-    background: #f9fafb !important;
+}}
+.leaflet-control-zoom a:hover {{
+    background: var(--leaflet-hover) !important;
     color: #16a34a !important;
-}
-.leaflet-control-zoom { border-radius: 10px !important; border: 1px solid #e5e7eb !important; overflow: hidden; box-shadow: 0 2px 6px rgba(0,0,0,0.06) !important; }
-.leaflet-control-attribution { font-family: 'Inter', sans-serif !important; font-size: 0.65rem !important; color: #9ca3af !important; background: rgba(255,255,255,0.85) !important; }
-.leaflet-tooltip { font-family: 'Inter', sans-serif !important; font-size: 0.82rem !important; border-radius: 8px !important; padding: 0.4rem 0.8rem !important; border: 1px solid #e5e7eb !important; box-shadow: 0 2px 8px rgba(0,0,0,0.08) !important; }
+}}
+.leaflet-control-zoom {{ border-radius: 10px !important; border: 1px solid var(--border-color) !important; overflow: hidden; box-shadow: 0 2px 6px rgba(0,0,0,0.06) !important; }}
+.leaflet-control-attribution {{ font-family: 'Inter', sans-serif !important; font-size: 0.65rem !important; color: var(--text-muted) !important; background: var(--bg-card) !important; opacity: 0.85; }}
+.leaflet-tooltip {{ font-family: 'Inter', sans-serif !important; font-size: 0.82rem !important; border-radius: 8px !important; padding: 0.4rem 0.8rem !important; border: 1px solid var(--border-color) !important; box-shadow: 0 2px 8px rgba(0,0,0,0.08) !important; background: var(--bg-card) !important; color: var(--text-primary) !important; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -207,6 +274,13 @@ THEME = {
     "marker_default": "#9ca3af",   # Map marker — unselected
 }
 
+if is_dark:
+    THEME["text"] = "#f8fafc"
+    THEME["text_secondary"] = "#cbd5e1"
+    THEME["border"] = "#334155"
+    THEME["surface"] = "#1e293b"
+    THEME["marker_selected"] = "#f8fafc"
+
 # ── User-friendly label mapping (Flaw 8 fix) ─────────────────────────────────
 # Maps internal system keys to human-readable labels so the UI never exposes
 # raw model/config terminology to end users.
@@ -242,6 +316,9 @@ with st.sidebar:
     view_mode = st.selectbox("View Mode", VIEW_MODES, help="Choose your role to see the most relevant information.")
     region = st.selectbox("Region", REGIONS)
     year = st.selectbox("Year", YEARS if YEARS else [2023])
+    
+    st.markdown("---")
+    theme_mode = st.selectbox("Theme Mode", ["Auto/System", "High-Contrast Light", "High-Contrast Dark"], key="theme_mode", help="Switch between light and dark modes for outdoor readability.")
     
     st.markdown("---")
     st.markdown("🌍 **Offline Workspace**")
@@ -385,7 +462,7 @@ if prediction:
                 x="Yield (t/ha)",
                 y="Probability Density",
                 title="Crop Yield Probability Distribution (GMM PDF Diagnostic)",
-                template="plotly_white"
+                template=plotly_template
             )
             fig_pdf.update_traces(
                 line=dict(color="#d97706", width=2),
@@ -424,7 +501,7 @@ with left:
         st.info("No historical yield data for this region.")
     else:
         hdf = context["yield_history"].sort_values("year")
-        fig = px.line(hdf, x="year", y="yield", markers=True, template="plotly_white")
+        fig = px.line(hdf, x="year", y="yield", markers=True, template=plotly_template)
         fig.update_traces(line=dict(color="#16a34a", width=2.5), marker=dict(color="#16a34a", size=8))
         if prediction:
             fig.add_trace(go.Scatter(x=[prediction["year"]], y=[prediction["predicted_yield"]], mode="markers", marker=dict(size=14, color="#d97706", symbol="diamond"), name="Forecast"))
@@ -434,7 +511,7 @@ with left:
     st.subheader("Vegetation Index (NDVI)")
     if active_ndvi:
         ndf = pd.DataFrame({"step": list(range(1, len(active_ndvi)+1)), "ndvi": active_ndvi})
-        fn = px.area(ndf, x="step", y="ndvi", template="plotly_white")
+        fn = px.area(ndf, x="step", y="ndvi", template=plotly_template)
         fn.update_traces(line=dict(color="#16a34a", width=2), fillcolor="rgba(22,163,74,0.08)")
         fn.add_hline(y=0.3, line_dash="dot", line_color="#d97706", annotation_text="Stress threshold")
         fn.update_layout(height=250, margin=dict(l=0,r=0,t=10,b=0), xaxis_title="Time Step", yaxis_title="NDVI", font=dict(family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"))
@@ -458,14 +535,16 @@ with right:
                 "Soil": ("🌱 Soil quality", "soil nutrients, pH, and organic content"),
             }
             # Find the dominant driver
+            # Find the dominant driver and normalize its percentage contribution relative to the total attribution sum
             if raw_attr:
+                total_attr = sum(abs(v) for v in raw_attr.values())
                 top_driver = max(raw_attr, key=raw_attr.get)
                 label, explanation = attr_translations.get(top_driver, (top_driver, ""))
-                pct = raw_attr[top_driver] * 100
+                pct = (abs(raw_attr[top_driver]) / total_attr * 100) if total_attr > 0.0 else 0.0
                 st.markdown(
                     f'<div class="info-card">'
                     f'<strong>Main factor affecting your harvest:</strong> {label}<br>'
-                    f'This accounts for about <strong>{pct:.0f}%</strong> of the forecast — '
+                    f'This accounts for about <strong>{pct:.0f}%</strong> of the total feature attribution — '
                     f'it is based on {explanation}.'
                     f'</div>',
                     unsafe_allow_html=True
@@ -481,7 +560,7 @@ with right:
             raw_attr = prediction["attribution"]
             friendly_attr = {_friendly(k): v for k, v in raw_attr.items()}
             adf = pd.DataFrame({"Factor": list(friendly_attr.keys()), "Impact": list(friendly_attr.values())}).sort_values("Impact")
-            fa = px.bar(adf, x="Impact", y="Factor", orientation="h", template="plotly_white", color="Impact", color_continuous_scale=[THEME["primary_light"], THEME["primary"], THEME["primary_dark"]])
+            fa = px.bar(adf, x="Impact", y="Factor", orientation="h", template=plotly_template, color="Impact", color_continuous_scale=[THEME["primary_light"], THEME["primary"], THEME["primary_dark"]])
             fa.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0), coloraxis_showscale=False, font=dict(family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"))
             st.plotly_chart(fa, use_container_width=True)
 

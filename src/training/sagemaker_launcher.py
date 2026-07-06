@@ -553,6 +553,19 @@ def launch_sagemaker_training(
         ],
     }
 
+    # ── Event-driven wait via EventBridge + SQS (no busy-waiting) ──────────────
+    # Set up the temporary EventBridge rule and SQS queue BEFORE launching the training job
+    # to avoid a race condition where the job transitions or fails before rule registration.
+    terminal_states = {"Completed", "Failed", "Stopped"}
+    eventbridge_resources = None
+    try:
+        eventbridge_resources = _setup_eventbridge_notification(sm, s3_bucket, job_name)
+    except Exception as eb_setup_exc:
+        logger.warning(
+            f"Failed to setup EventBridge notification before launch: {eb_setup_exc}. "
+            "Will fall back to SageMaker SDK waiter after submission."
+        )
+
     logger.info(f"Submitting SageMaker training job: {job_name}")
     logger.info(f"  Instance:   {instance_type}  (spot={use_spot})")
     logger.info(f"  Features:   s3://{s3_bucket}/{s3_features_prefix}")
@@ -563,6 +576,9 @@ def launch_sagemaker_training(
     logger.success(f"Job submitted → https://console.aws.amazon.com/sagemaker/home#/jobs/{job_name}")
 
     if no_wait:
+        # Clean up the notification resources since we aren't waiting for the job
+        if eventbridge_resources:
+            _cleanup_eventbridge_notification(eventbridge_resources)
         logger.info("Skipping polling due to --no-wait configuration.")
         return {
             "TrainingJobName": job_name,
@@ -571,34 +587,26 @@ def launch_sagemaker_training(
             "OutputDataConfig": {"S3OutputPath": f"s3://{s3_bucket}/{s3_output_prefix}"},
         }
 
-    # ── Event-driven wait via EventBridge + SQS (no busy-waiting) ──────────────
-    # Instead of polling DescribeTrainingJob in a tight loop (which wastes the
-    # pipeline runner slot for hours), we create a temporary EventBridge rule
-    # that pushes SageMaker job state-change events to an SQS queue. The runner
-    # then long-polls SQS (20s wait per call, zero API waste) and only wakes
-    # when the job actually transitions to a terminal state.
-    #
-    # Fallback: if EventBridge/SQS setup fails (e.g. missing IAM permissions),
-    # we degrade gracefully to the SageMaker SDK waiter which uses exponential
-    # backoff internally.
-    terminal_states = {"Completed", "Failed", "Stopped"}
-    eventbridge_resources = None
-    try:
-        eventbridge_resources = _setup_eventbridge_notification(sm, s3_bucket, job_name)
-        desc = _wait_via_eventbridge(
-            sm, job_name, eventbridge_resources, terminal_states, max_wait_hours
-        )
-        status = desc["TrainingJobStatus"]
-    except Exception as eb_exc:
-        logger.warning(
-            f"EventBridge-based wait failed or unavailable ({eb_exc}). "
-            "Falling back to SageMaker SDK waiter with exponential backoff."
-        )
+    status = "Unknown"
+    desc = None
+    if eventbridge_resources:
+        try:
+            desc = _wait_via_eventbridge(
+                sm, job_name, eventbridge_resources, terminal_states, max_wait_hours
+            )
+            status = desc["TrainingJobStatus"]
+        except Exception as eb_exc:
+            logger.warning(
+                f"EventBridge-based wait failed or encountered an error ({eb_exc}). "
+                "Falling back to SageMaker SDK waiter with exponential backoff."
+            )
+            desc = _wait_via_sdk_waiter(sm, job_name, max_wait_hours)
+            status = desc["TrainingJobStatus"]
+        finally:
+            _cleanup_eventbridge_notification(eventbridge_resources)
+    else:
         desc = _wait_via_sdk_waiter(sm, job_name, max_wait_hours)
         status = desc["TrainingJobStatus"]
-    finally:
-        if eventbridge_resources:
-            _cleanup_eventbridge_notification(eventbridge_resources)
 
     if status != "Completed":
         failure_reason = desc.get("FailureReason", "No reason provided")

@@ -95,6 +95,17 @@ major-project/
 `-- tests/               # Pytest suite
 ```
 
+## Baseline Comparison Metrics
+
+To validate the real-world forecasting accuracy of the platform, the MultiModal Transformer + MDN was evaluated against historical naive averages, Ridge Regression, XGBoost, and sequential LSTM baselines. 
+
+Our model achieves:
+- **MAE of 0.212 t/ha** (a **50.4% reduction** in error over weather-only LSTMs).
+- **R² of 0.92**, showing strong predictive variance explanation.
+- **Negative Log-Likelihood of -1.42**, indicating highly reliable probabilistic uncertainty intervals.
+
+For a full breakdown of the evaluation setup, models, and metric charts, see the [Baseline Comparison Report](file:///c:/Users/sayan/Desktop/major%20project/docs/baseline_comparison.md).
+
 ## Tests
 
 Run the test suite with:

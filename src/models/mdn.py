@@ -43,7 +43,9 @@ class MixtureDensityNetwork(nn.Module):
         x: (B, D) - Hidden representation from Transformer
         returns: (pi, sigma, mu)
         """
-        pi = self.pi(x)
+        # Access the underlying Linear layer in self.pi Sequential block to get raw logits
+        # this preserves key compatibility with existing checkpoints
+        pi_logits = self.pi[0](x)
         log_sigma_raw = self.log_sigma(x)
         mu = self.mu(x)
         
@@ -54,6 +56,10 @@ class MixtureDensityNetwork(nn.Module):
         # Log-scale sigma: softplus provides smooth differentiable lower bound,
         # sigma_min provides an absolute floor without creating gradient discontinuities
         sigma = nn.functional.softplus(log_sigma_raw) + self.sigma_min
+        
+        # Stably compute pi and log_pi
+        pi = nn.functional.softmax(pi_logits, dim=1)
+        pi.log_pi = nn.functional.log_softmax(pi_logits, dim=1)
         
         return pi, sigma, mu
 
@@ -522,14 +528,19 @@ def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: to
     log_prob = torch.sum(log_prob, dim=2) # (B, K)
     
     # Weight by mixing coefficients (pi)
-    # Use LogSumExp for stability
-    nll = -torch.logsumexp(torch.log(pi + 1e-10) + log_prob, dim=1) # (B,)
+    # Use LogSumExp for stability and leverage pre-computed log_pi if available
+    log_pi = getattr(pi, "log_pi", None)
+    if log_pi is None:
+        log_pi = torch.log(pi + 1e-10)
+        
+    nll = -torch.logsumexp(log_pi + log_prob, dim=1) # (B,)
     
     loss = nll
     if entropy_weight > 0.0:
         # Entropy Regularization scaled dynamically based on target variance
         # entropy = -sum(pi * log(pi))
-        entropy_penalty = torch.sum(pi * torch.log(pi + 1e-10), dim=1) 
+        # Use log_pi directly for stability
+        entropy_penalty = torch.sum(pi * log_pi, dim=1) 
         loss = loss + (entropy_weight * dynamic_scale) * entropy_penalty
     
     return torch.mean(loss)

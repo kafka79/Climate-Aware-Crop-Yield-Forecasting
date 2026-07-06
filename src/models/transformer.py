@@ -68,6 +68,7 @@ class MultiModalTransformer(nn.Module):
                                                    batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer,
                                                          num_layers=self.config["num_layers"])
+        self.pos_encoder = PositionalEncoding(hidden_dim)
 
         # Cross-Modal Attention: satellite queries attend to weather and soil context
         self.cross_attn = nn.MultiheadAttention(embed_dim=hidden_dim,
@@ -106,6 +107,25 @@ class MultiModalTransformer(nn.Module):
             sat_spatial = self.spatial_cnn(sat_flat)  # (B * T, C, 1, 1)
             sat = sat_spatial.view(B, T, C)          # (B, T, C)
 
+        # Downsample sequence length of raw inputs if it exceeds max_kv_len.
+        # This forces the temporal convolution and LSTM weather_encoder to operate on
+        # aligned, downsampled temporal steps directly, preserving valid sequential
+        # transition states and ensuring strict temporal feature alignment.
+        T = sat.shape[1]
+        max_kv_len = self.config.get("max_kv_len", 12)
+        if T > max_kv_len:
+            # sat: (B, T, C) -> transpose to (B, C, T) -> pool -> (B, max_kv_len, C)
+            sat_t = sat.transpose(1, 2)
+            sat_pooled = torch.nn.functional.adaptive_avg_pool1d(sat_t, max_kv_len)
+            sat = sat_pooled.transpose(1, 2)
+
+            # weather: (B, T, F_w) -> transpose to (B, F_w, T) -> pool -> (B, max_kv_len, F_w)
+            weather_t = weather.transpose(1, 2)
+            weather_pooled = torch.nn.functional.adaptive_avg_pool1d(weather_t, max_kv_len)
+            weather = weather_pooled.transpose(1, 2)
+
+            T = max_kv_len
+
         # 1. Encode satellite: temporal conv + linear residual path
         sat_t = sat.transpose(1, 2)                          # (B, C, T)
         sat_conv = self.temporal_conv(sat_t).transpose(1, 2)  # (B, T, D)
@@ -114,24 +134,6 @@ class MultiModalTransformer(nn.Module):
 
         # 2. Encode weather
         weather_enc, _ = self.weather_encoder(weather)        # (B, T, D)
-
-        # Downsample sequence length of embeddings if it exceeds max_kv_len to eliminate O(T^2) self-attention complexity
-        # and keep cross-attention keys/values bounded. This executes feature extraction at full resolution
-        # and downsamples embeddings to prevent attention bottleneck.
-        T = sat_enc.shape[1]
-        max_kv_len = self.config.get("max_kv_len", 12)
-        if T > max_kv_len:
-            # sat_enc is (B, T, D) -> transpose to (B, D, T) for 1D pooling
-            sat_enc_t = sat_enc.transpose(1, 2)
-            sat_enc_pooled = torch.nn.functional.adaptive_avg_pool1d(sat_enc_t, max_kv_len)
-            sat_enc = sat_enc_pooled.transpose(1, 2)
-
-            # weather_enc is (B, T, D) -> transpose to (B, D, T) for 1D pooling
-            weather_enc_t = weather_enc.transpose(1, 2)
-            weather_enc_pooled = torch.nn.functional.adaptive_avg_pool1d(weather_enc_t, max_kv_len)
-            weather_enc = weather_enc_pooled.transpose(1, 2)
-
-            T = max_kv_len
 
         # 3. Input perturbation/jittering regularization
         if self.training and self.use_jitter:
@@ -160,7 +162,8 @@ class MultiModalTransformer(nn.Module):
         # Broadcast soil_enc (B, 1, D) to (B, T, D) during addition
         fused = self.gate_cross * cross_out + self.gate_weather * weather_enc + self.gate_soil * soil_enc  # (B, T, D)
         
-        # 7. Transformer self-attention refinement
+        # 7. Add positional encodings to sequence embeddings and run Transformer refinement
+        fused = self.pos_encoder(fused)
         # With batch_first=True, no permute is necessary!
         out = self.transformer_encoder(fused)                 # (B, T, D)
 
