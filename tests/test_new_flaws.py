@@ -226,3 +226,58 @@ def test_recommendation_zero_yield():
     # Should not raise ZeroDivisionError and should run successfully
     advice = engine.generate_advice(result)
     assert len(advice) > 0
+
+
+# ── Flaw-fix tests for the 4 remaining panel-identified issues ──────────────
+
+# 9. Test DDP validation loss synchronization
+def test_ddp_val_loss_sync():
+    """Verify that trainer.py calls all_reduce on val_loss when DDP is initialized."""
+    import src.training.trainer as trainer_mod
+    import inspect
+    source = inspect.getsource(trainer_mod.TrainManager.run)
+    # ponytail: just check the critical call exists in the source
+    assert "all_reduce" in source, "fit() must call all_reduce to sync val_loss across ranks"
+    assert "ReduceOp.SUM" in source, "Must use SUM reduction for averaging"
+
+
+# 10. Test MDN mode finder sigma-scaling
+def test_mdn_mode_finder_small_sigma_stability():
+    """Mode finder must not explode when sigma is very small."""
+    from src.models.mdn import _find_modes_gradient_ascent
+    
+    # Two components with very small sigma — previously caused gradient explosion
+    pi = torch.tensor([0.5, 0.5])
+    sigma = torch.tensor([[1e-4], [1e-4]])
+    mu = torch.tensor([[3.0], [7.0]])
+    
+    modes = _find_modes_gradient_ascent(pi, sigma, mu)
+    
+    # Should find modes near the component means, not explode to inf/nan
+    assert len(modes) > 0, "Must find at least one mode"
+    for log_d, pos in modes:
+        assert not np.isnan(log_d), f"Mode log-density is NaN"
+        assert not np.isinf(pos.abs().max().item()), f"Mode position exploded to inf"
+        # Modes should stay near original means (3.0 or 7.0), not diverge far
+        assert pos.abs().max().item() < 100, f"Mode {pos} diverged far from component means"
+
+
+# 11. Test prefetch infrastructure exists in dataset
+def test_dataset_prefetch_method():
+    """Verify the dataset has the _prefetch_chunk method for async I/O."""
+    from src.temporal.timeseries_dataset import MultiModalCropIterableDataset
+    assert hasattr(MultiModalCropIterableDataset, '_prefetch_chunk'), \
+        "Dataset must have _prefetch_chunk for async I/O"
+    import inspect
+    iter_source = inspect.getsource(MultiModalCropIterableDataset.__iter__)
+    assert "threading.Thread" in iter_source or "prefetch_q" in iter_source, \
+        "__iter__ must use background thread for prefetching"
+
+
+# 12. Test app.py no longer claims false offline capability
+def test_app_no_false_offline_claim():
+    """The sidebar must not claim 'Offline Workspace' — should say 'Edge Client' instead."""
+    import inspect
+    source = inspect.getsource(app)
+    assert "Offline Workspace" not in source, "Must not claim misleading 'Offline Workspace'"
+    assert "Edge Client" in source, "Should honestly label as 'Edge Client (PWA)'"

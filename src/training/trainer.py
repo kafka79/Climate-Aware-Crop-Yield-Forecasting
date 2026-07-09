@@ -336,6 +336,13 @@ class TrainManager:
                 break
 
             val_loss   = self.validate(val_loader)
+
+            # ponytail: DDP sync — all ranks must agree on val_loss before scheduler/checkpoint decisions
+            if torch.distributed.is_initialized():
+                val_loss_tensor = torch.tensor(val_loss, device=self.device)
+                torch.distributed.all_reduce(val_loss_tensor, op=torch.distributed.ReduceOp.SUM)
+                val_loss = (val_loss_tensor / torch.distributed.get_world_size()).item()
+
             self._sync_termination_flag()
             if self._termination_requested.is_set():
                 logger.warning(

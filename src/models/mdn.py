@@ -129,6 +129,10 @@ def _find_modes_gradient_ascent(
     K, O = mu.shape
     candidates = []
 
+    # ponytail: scale lr by min sigma to prevent gradient explosion when sigma ~ 1e-4
+    min_sigma = float(sigma.min().clamp(min=1e-6))
+    effective_lr = lr * min_sigma
+
     for k in range(K):
         if float(pi[k]) < 1e-6:
             continue
@@ -148,7 +152,9 @@ def _find_modes_gradient_ascent(
                 grad = y.grad
                 if grad is None:
                     break
-                step = lr * grad
+                step = effective_lr * grad
+                # Clamp step to prevent overshooting beyond component basins
+                step = step.clamp(-min_sigma * 2, min_sigma * 2)
                 y = (y + step).detach().requires_grad_(True)
                 if float(step.abs().max()) < convergence_tol:
                     break

@@ -321,9 +321,10 @@ with st.sidebar:
     theme_mode = st.selectbox("Theme Mode", ["Auto/System", "High-Contrast Light", "High-Contrast Dark"], key="theme_mode", help="Switch between light and dark modes for outdoor readability.")
     
     st.markdown("---")
-    st.markdown("🌍 **Offline Workspace**")
-    st.markdown("To compute yield forecasts locally and offline, use the standalone edge PWA:")
-    st.markdown("[**Open Offline Standalone App**](http://localhost:8000/)")
+    # ponytail: honest label — PWA needs localhost for initial load, not truly zero-server offline
+    st.markdown("🌍 **Edge Client (PWA)**")
+    st.markdown("Run forecasts in-browser via ONNX. Requires a local dev server for first load; works offline after service worker install.")
+    st.markdown("[**Open Edge PWA Client**](http://localhost:8000/)")
 
 context = build_region_context(region, int(year), CONFIG)
 result_key = f"{region}:{year}"

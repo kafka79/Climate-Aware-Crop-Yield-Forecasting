@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import math
+import threading
+import queue as _queue
 from loguru import logger
 from typing import Iterator
 
@@ -11,6 +13,7 @@ class MultiModalCropIterableDataset(IterableDataset):
     """
     PyTorch IterableDataset for multi-modal crop yield prediction.
     Streams sequences lazily from Zarr stores in chunks to prevent OOM errors.
+    Uses background-thread prefetching to overlap disk I/O with GPU compute.
     """
     def __init__(self, yield_df: pd.DataFrame, sat_ds: xr.Dataset, 
                  weather_ds: xr.Dataset, soil_vectors: np.ndarray, config: dict, chunk_size: int = 1000):
@@ -24,6 +27,18 @@ class MultiModalCropIterableDataset(IterableDataset):
         self.C = config["transformer"]["input_dim"]
         
         logger.info(f"Initialized IterableDataset with {len(self.yield_df)} samples.")
+
+    def _prefetch_chunk(self, chunk_df, out_queue):
+        """Load a chunk from Zarr in a background thread so the main thread can yield samples concurrently."""
+        try:
+            lats = xr.DataArray(chunk_df["lat"].values, dims="location")
+            lons = xr.DataArray(chunk_df["lon"].values, dims="location")
+            # ponytail: this .load() now runs in a background thread, overlapping I/O with GPU compute
+            sat_pixels = self.sat_ds.sel(lat=lats, lon=lons, method="nearest").load()
+            weather_pixels = self.weather_ds.sel(lat=lats, lon=lons, method="nearest").load()
+            out_queue.put((sat_pixels, weather_pixels))
+        except Exception as e:
+            out_queue.put(e)
 
     def __iter__(self) -> Iterator[dict]:
         import torch.distributed as dist
@@ -56,17 +71,33 @@ class MultiModalCropIterableDataset(IterableDataset):
         if len(worker_df) == 0:
             return iter([])
 
-        # Process in chunks to balance I/O and Memory
-        for chunk_start in range(0, len(worker_df), self.chunk_size):
+        # ponytail: prefetch next chunk in background thread while yielding current chunk
+        chunk_boundaries = list(range(0, len(worker_df), self.chunk_size))
+
+        # Pre-start first chunk load
+        prefetch_q = _queue.Queue(maxsize=1)
+        first_chunk_df = worker_df.iloc[chunk_boundaries[0]:chunk_boundaries[0] + self.chunk_size]
+        t = threading.Thread(target=self._prefetch_chunk, args=(first_chunk_df, prefetch_q), daemon=True)
+        t.start()
+
+        for ci, chunk_start in enumerate(chunk_boundaries):
             chunk_df = worker_df.iloc[chunk_start:chunk_start + self.chunk_size]
             chunk_soil = worker_soil[chunk_start:chunk_start + self.chunk_size]
-            
-            lats = xr.DataArray(chunk_df["lat"].values, dims="location")
-            lons = xr.DataArray(chunk_df["lon"].values, dims="location")
-            
-            # Load a chunk into memory
-            sat_pixels = self.sat_ds.sel(lat=lats, lon=lons, method="nearest").load()
-            weather_pixels = self.weather_ds.sel(lat=lats, lon=lons, method="nearest").load()
+
+            # Wait for prefetched data
+            result = prefetch_q.get()
+            if isinstance(result, Exception):
+                raise result
+            sat_pixels, weather_pixels = result
+
+            # Start prefetching next chunk while we yield current samples
+            next_ci = ci + 1
+            if next_ci < len(chunk_boundaries):
+                prefetch_q = _queue.Queue(maxsize=1)
+                next_start = chunk_boundaries[next_ci]
+                next_chunk_df = worker_df.iloc[next_start:next_start + self.chunk_size]
+                t = threading.Thread(target=self._prefetch_chunk, args=(next_chunk_df, prefetch_q), daemon=True)
+                t.start()
 
             for i, (_, row) in enumerate(chunk_df.iterrows()):
                 yield_time = pd.to_datetime(row["time"])
