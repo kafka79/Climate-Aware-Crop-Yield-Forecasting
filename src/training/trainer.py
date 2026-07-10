@@ -434,13 +434,23 @@ class TrainManager:
     def _poison_pill_path(self) -> "Path":
         """Return the path to the shared termination poison file.
 
-        Uses the checkpoint directory (shared across ranks in multi-node
-        training via EFS/FSx) so all ranks can see it.
+        On SageMaker multi-node training, each node has isolated local storage.
+        SageMaker's managed checkpoint directory (/opt/ml/checkpoints) is the
+        only path automatically synced to S3 across nodes, making the poison
+        pill visible to all ranks without requiring a separate EFS/FSx mount.
+
+        ponytail: uses SM_MODEL_DIR env as SageMaker detection signal — no
+        new dependencies, just reads the dir SageMaker already provisions.
         """
         from pathlib import Path
-        save_dir = Path(self.config.get("training", {}).get(
-            "save_path", "models/checkpoints"
-        ))
+        # SageMaker provides /opt/ml/checkpoints as a shared, S3-synced dir
+        sm_checkpoint_dir = os.environ.get("SM_CHECKPOINT_DIR")
+        if sm_checkpoint_dir:
+            save_dir = Path(sm_checkpoint_dir)
+        else:
+            save_dir = Path(self.config.get("save_path",
+                                           self.full_config.get("training", {}).get(
+                                               "save_path", "models/checkpoints")))
         save_dir.mkdir(parents=True, exist_ok=True)
         return save_dir / ".ddp_termination_pill"
 

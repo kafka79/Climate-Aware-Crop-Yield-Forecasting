@@ -131,17 +131,54 @@ def prepare_training_sequences(
     weather_ds: xr.Dataset,
     config: dict,
 ):
-    """Lazy wrapper — collects generated sequences into arrays."""
+    """Lazy wrapper — streams sequences to a memory-mapped file to avoid OOM.
+
+    ponytail: uses tempfile memmap for datasets > 10k rows, plain list otherwise.
+    The memmap is auto-cleaned when the returned array is GC'd or process exits.
+    """
+    import tempfile
+
     fuser = MultiModalFuser(config)
-    X_list, y_list = [], []
+    gen = fuser.generate_lazy_sequences(yield_df, sat_ds, weather_ds)
 
-    for X, y in fuser.generate_lazy_sequences(yield_df, sat_ds, weather_ds):
-        X_list.append(X)
-        y_list.append(y)
-
-    if not X_list:
+    # Peek at first item to get shape
+    first = next(gen, None)
+    if first is None:
         logger.warning("No valid sequences generated.")
         return None, None
 
-    logger.success(f"Prepared {len(X_list)} sequences for training.")
-    return np.array(X_list), np.array(y_list)
+    X_first, y_first = first
+    x_shape = np.asarray(X_first).shape
+
+    use_memmap = len(yield_df) > 10_000
+    if use_memmap:
+        x_file = tempfile.NamedTemporaryFile(suffix="_X.npy", delete=False)
+        y_file = tempfile.NamedTemporaryFile(suffix="_y.npy", delete=False)
+        # Pre-allocate with upper-bound size; trim at end
+        max_n = len(yield_df)
+        X_mm = np.memmap(x_file.name, dtype=np.float32, mode='w+', shape=(max_n, *x_shape))
+        y_mm = np.memmap(y_file.name, dtype=np.float32, mode='w+', shape=(max_n,))
+        X_mm[0] = np.asarray(X_first, dtype=np.float32)
+        y_mm[0] = np.float32(y_first)
+        idx = 1
+        for X, y in gen:
+            X_mm[idx] = np.asarray(X, dtype=np.float32)
+            y_mm[idx] = np.float32(y)
+            idx += 1
+        # Trim to actual count
+        X_out = np.array(X_mm[:idx])
+        y_out = np.array(y_mm[:idx])
+        del X_mm, y_mm
+        import os
+        os.unlink(x_file.name)
+        os.unlink(y_file.name)
+    else:
+        X_list, y_list = [X_first], [y_first]
+        for X, y in gen:
+            X_list.append(X)
+            y_list.append(y)
+        X_out = np.array(X_list)
+        y_out = np.array(y_list)
+
+    logger.success(f"Prepared {len(y_out)} sequences for training.")
+    return X_out, y_out

@@ -543,11 +543,12 @@ def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: to
     
     loss = nll
     if entropy_weight > 0.0:
-        # Entropy Regularization scaled dynamically based on target variance
-        # entropy = -sum(pi * log(pi))
-        # Use log_pi directly for stability
-        entropy_penalty = torch.sum(pi * log_pi, dim=1) 
-        loss = loss + (entropy_weight * dynamic_scale) * entropy_penalty
+        # Entropy regularization: H = -sum(pi * log(pi)) is positive.
+        # ponytail: old code ADDED sum(pi*log_pi) which is negative, rewarding
+        # uniform distributions. Fixed: SUBTRACT it to penalize high entropy,
+        # encouraging confident unimodal predictions when warranted.
+        entropy = -torch.sum(pi * log_pi, dim=1)  # H >= 0
+        loss = loss + (entropy_weight * dynamic_scale) * entropy
     
     return torch.mean(loss)
 

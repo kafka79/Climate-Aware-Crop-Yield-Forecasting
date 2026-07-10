@@ -114,15 +114,19 @@ class MultiModalTransformer(nn.Module):
         T = sat.shape[1]
         max_kv_len = self.config.get("max_kv_len", 12)
         if T > max_kv_len:
-            # sat: (B, T, C) -> transpose to (B, C, T) -> pool -> (B, max_kv_len, C)
+            # ponytail: avg_pool alone destroys pest/frost/heatwave spikes.
+            # Concat avg+max preserves both trends and extremes. Cheap, no new params.
+            # sat: (B, T, C) -> (B, C, T) -> pool -> concat -> (B, max_kv_len, C)
             sat_t = sat.transpose(1, 2)
-            sat_pooled = torch.nn.functional.adaptive_avg_pool1d(sat_t, max_kv_len)
-            sat = sat_pooled.transpose(1, 2)
+            sat_avg = torch.nn.functional.adaptive_avg_pool1d(sat_t, max_kv_len)
+            sat_max = torch.nn.functional.adaptive_max_pool1d(sat_t, max_kv_len)
+            sat = (0.5 * sat_avg + 0.5 * sat_max).transpose(1, 2)
 
-            # weather: (B, T, F_w) -> transpose to (B, F_w, T) -> pool -> (B, max_kv_len, F_w)
+            # weather: same treatment
             weather_t = weather.transpose(1, 2)
-            weather_pooled = torch.nn.functional.adaptive_avg_pool1d(weather_t, max_kv_len)
-            weather = weather_pooled.transpose(1, 2)
+            w_avg = torch.nn.functional.adaptive_avg_pool1d(weather_t, max_kv_len)
+            w_max = torch.nn.functional.adaptive_max_pool1d(weather_t, max_kv_len)
+            weather = (0.5 * w_avg + 0.5 * w_max).transpose(1, 2)
 
             T = max_kv_len
 

@@ -17,7 +17,7 @@ _DANGEROUS_TERMS = re.compile(
     r"\b("
     r"paraquat|endosulfan|chlorpyrifos|glyphosate|atrazine|methyl\s*bromide|"
     r"DDT|aldrin|dieldrin|monocrotophos|"
-    r"(\d{3,})\s*(kg|liters?|gallons?|tons?)\s*(per|/)\s*(hectare|acre|ha)|"
+    r"(\d+)\s*(kg|liters?|gallons?|tons?)\s*(per|/)\s*(hectare|acre|ha)|"
     r"inject\s+directly|undiluted|maximum\s+dosage|exceed\s+recommended"
     r")\b",
     re.IGNORECASE,

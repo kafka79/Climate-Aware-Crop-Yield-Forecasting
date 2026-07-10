@@ -37,23 +37,6 @@ class SoilFeatureExtractor:
         else:
             return "Loam"
 
-def process_soil_metrics(soil_df: pd.DataFrame):
-    """
-    Normalize and scale soil metrics (pH, SOC, N, P, K).
-    """
-    logger.info("Normalizing soil metrics...")
-    # Get numeric columns only
-    metrics = soil_df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    if len(metrics) == 0:
-        return soil_df
 
-    # Avoid div by zero
-    std_devs = soil_df[metrics].std()
-    std_devs[std_devs == 0] = 1e-10
-
-    normalized = (soil_df[metrics] - soil_df[metrics].mean()) / std_devs
-    
-    # Merge normalized with non-numeric
-    non_numeric = soil_df.select_dtypes(exclude=[np.number])
-    return pd.concat([normalized, non_numeric], axis=1)
+# ponytail: process_soil_metrics deleted — dead code, never imported anywhere.
+# It also had a bug: std() on a 1-row dataframe returns NaN, crashing inference.
