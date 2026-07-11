@@ -212,9 +212,21 @@ _CONNECTION_MONITOR_HTML = """
 ">
     ⚠️ Connection lost — forecast controls are disabled until reconnected.
 </div>
+<!-- Full-viewport blocking overlay: rendered inside the iframe and stretched
+     to cover the parent viewport using position:fixed.  This avoids ALL
+     direct parent DOM manipulation (no querySelectorAll, no button[kind=...]),
+     making the monitor immune to Streamlit internal class/element changes.
+     The overlay captures pointer events, preventing any clicks from reaching
+     underlying Streamlit controls while connection is lost. -->
+<div id="conn-overlay" style="
+    display:none; position:fixed; top:0; left:0; width:100vw; height:100vh;
+    z-index:99998; background:rgba(15,23,42,0.3); backdrop-filter:blur(4px);
+    pointer-events:all; cursor:not-allowed;
+"></div>
 <script>
 (function() {
     var banner = document.getElementById('conn-banner');
+    var overlay = document.getElementById('conn-overlay');
     var lastPong = Date.now();
     var CHECK_INTERVAL = 3000;  // check every 3s
     var TIMEOUT = 8000;         // consider disconnected after 8s without heartbeat
@@ -230,23 +242,10 @@ _CONNECTION_MONITOR_HTML = """
         var elapsed = Date.now() - lastPong;
         if (elapsed > TIMEOUT) {
             banner.style.display = 'block';
-            // Disable interactive controls in the parent Streamlit frame
-            try {
-                var parent = window.parent.document;
-                parent.querySelectorAll('button[kind="primary"], select, textarea').forEach(function(el) {
-                    el.disabled = true;
-                    el.style.opacity = '0.4';
-                });
-            } catch(err) { /* cross-origin safety */ }
+            overlay.style.display = 'block';
         } else {
             banner.style.display = 'none';
-            try {
-                var parent = window.parent.document;
-                parent.querySelectorAll('button[kind="primary"], select, textarea').forEach(function(el) {
-                    el.disabled = false;
-                    el.style.opacity = '1';
-                });
-            } catch(err) {}
+            overlay.style.display = 'none';
         }
     }, CHECK_INTERVAL);
 })();

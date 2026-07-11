@@ -64,6 +64,62 @@ class MixtureDensityNetwork(nn.Module):
         return pi, sigma, mu
 
 
+def mdn_prune_components(
+    pi: torch.Tensor,
+    sigma: torch.Tensor,
+    mu: torch.Tensor,
+    weight_threshold: float = 0.05,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Dynamically prune negligible mixture components during inference.
+
+    With a fixed K=5 MDN, unimodal distributions often produce 2-3 components
+    with pi_k < 0.05 that contribute near-zero probability mass but inflate
+    the predictive variance calculation (sigma oscillation).  This function
+    zeros out those ghost components and renormalizes the remaining weights,
+    giving the downstream mdn_expected_value / mdn_predictive_std functions
+    a cleaner, effectively lower-K mixture to work with.
+
+    Args:
+        pi:    (B, K) or (K,) mixing coefficients
+        sigma: (B, K, O) or (K, O) component std-devs
+        mu:    (B, K, O) or (K, O) component means
+        weight_threshold: components with pi_k below this are pruned
+
+    Returns:
+        (pi_pruned, sigma_pruned, mu_pruned) with the same shapes as input.
+        Pruned components have pi=0 and are excluded from normalization.
+    """
+    # Create mask for significant components
+    mask = pi >= weight_threshold  # (B, K) or (K,)
+
+    # If ALL components would be pruned (degenerate case), keep the largest one
+    if pi.dim() == 1:
+        if not mask.any():
+            mask[pi.argmax()] = True
+    else:
+        for b in range(pi.size(0)):
+            if not mask[b].any():
+                mask[b, pi[b].argmax()] = True
+
+    # Zero out pruned components and renormalize
+    pi_pruned = pi * mask.float()
+    # Renormalize so weights sum to 1
+    pi_sum = pi_pruned.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+    pi_pruned = pi_pruned / pi_sum
+
+    # Zero the mu/sigma of pruned components to prevent them from
+    # influencing gradient-ascent mode finding or std calculations
+    if pi.dim() == 1:
+        mask_expanded = mask.unsqueeze(-1)  # (K, 1)
+    else:
+        mask_expanded = mask.unsqueeze(-1)  # (B, K, 1)
+
+    sigma_pruned = sigma * mask_expanded.float() + (~mask_expanded).float() * 1e-6
+    mu_pruned = mu * mask_expanded.float()
+
+    return pi_pruned, sigma_pruned, mu_pruned
+
+
 def mdn_expected_value(
     pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor
 ) -> torch.Tensor:

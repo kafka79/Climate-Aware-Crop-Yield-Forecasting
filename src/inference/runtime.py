@@ -342,6 +342,7 @@ from src.explainability.integrated_gradients import explain_prediction
 from src.models.mdn import (
     mdn_expected_value,
     mdn_predictive_std,
+    mdn_prune_components,
     mdn_safe_point_estimate,
     BimodalDistributionWarning,
 )
@@ -450,8 +451,46 @@ class MissingSoilDataWarning(UserWarning):
 # TTL = 300 seconds. This prevents re-reading every soil CSV on every inference
 # request — the blocking synchronous I/O that was causing latency spikes on the
 # FastAPI event loop.
+#
+# THREAD SAFETY (Flaw fix): All reads/writes are guarded by _SOIL_MEDIAN_LOCK
+# to prevent RuntimeError from concurrent dict mutations under multi-threaded
+# Uvicorn workers.  When REDIS_URL is set, results are also stored in Redis
+# for cross-process cache sharing under multi-worker Gunicorn deployments.
 _SOIL_MEDIAN_CACHE: Dict[Tuple, Tuple[float, Optional[np.ndarray]]] = {}
 _SOIL_MEDIAN_TTL_SECONDS = 300
+_SOIL_MEDIAN_LOCK = threading.Lock()
+
+
+def _redis_soil_cache_get(cache_key: Tuple) -> Optional[np.ndarray]:
+    """Attempt to read soil median from Redis (cross-process shared cache)."""
+    redis_url = os.environ.get("REDIS_URL")
+    if not redis_url:
+        return None
+    try:
+        import redis
+        r = redis.from_url(redis_url)
+        key_str = f"soil_median:{cache_key[0]}:{cache_key[1]}"
+        cached = r.get(key_str)
+        if cached is not None:
+            arr = np.frombuffer(cached, dtype=np.float32).copy()
+            return arr
+    except Exception:
+        pass
+    return None
+
+
+def _redis_soil_cache_set(cache_key: Tuple, value: Optional[np.ndarray]) -> None:
+    """Write soil median to Redis for cross-process sharing."""
+    redis_url = os.environ.get("REDIS_URL")
+    if not redis_url or value is None:
+        return
+    try:
+        import redis
+        r = redis.from_url(redis_url)
+        key_str = f"soil_median:{cache_key[0]}:{cache_key[1]}"
+        r.setex(key_str, _SOIL_MEDIAN_TTL_SECONDS, value.tobytes())
+    except Exception:
+        pass
 
 
 def _compute_regional_soil_median(
@@ -470,19 +509,34 @@ def _compute_regional_soil_median(
 
     Performance: Results are cached with a 300-second TTL to avoid blocking
     the FastAPI event loop with synchronous filesystem reads on every request.
+    Thread safety is guaranteed via _SOIL_MEDIAN_LOCK.
+    Cross-process sharing is handled via Redis when REDIS_URL is set.
     """
     cache_key = (soil_dim, exclude_region)
     now = _time_module.monotonic()
 
-    # Return cached value if still within TTL
-    if cache_key in _SOIL_MEDIAN_CACHE:
-        cached_time, cached_value = _SOIL_MEDIAN_CACHE[cache_key]
-        if now - cached_time < _SOIL_MEDIAN_TTL_SECONDS:
-            return cached_value.copy() if cached_value is not None else None
+    # 1. Check in-process cache (thread-safe read)
+    with _SOIL_MEDIAN_LOCK:
+        if cache_key in _SOIL_MEDIAN_CACHE:
+            cached_time, cached_value = _SOIL_MEDIAN_CACHE[cache_key]
+            if now - cached_time < _SOIL_MEDIAN_TTL_SECONDS:
+                return cached_value.copy() if cached_value is not None else None
 
-    # Cache miss or expired — compute from filesystem
+    # 2. Check Redis cross-process cache (outside lock to avoid blocking)
+    redis_hit = _redis_soil_cache_get(cache_key)
+    if redis_hit is not None:
+        with _SOIL_MEDIAN_LOCK:
+            _SOIL_MEDIAN_CACHE[cache_key] = (now, redis_hit)
+        return redis_hit.copy()
+
+    # 3. Cache miss or expired — compute from filesystem
     result = _compute_regional_soil_median_uncached(config, soil_dim, exclude_region)
-    _SOIL_MEDIAN_CACHE[cache_key] = (now, result)
+
+    # 4. Store in both in-process and Redis caches (thread-safe write)
+    with _SOIL_MEDIAN_LOCK:
+        _SOIL_MEDIAN_CACHE[cache_key] = (now, result)
+    _redis_soil_cache_set(cache_key, result)
+
     return result.copy() if result is not None else None
 
 
@@ -885,7 +939,12 @@ def run_inference(
 
         if isinstance(output, tuple):
             pi, sigma, mu = output
-            logger.info(f"Model outputs: pi={pi}, sigma={sigma}, mu={mu}")
+            # Flaw 3 fix: Prune negligible mixture components (pi_k < 0.05)
+            # before computing point estimates and variance.  This prevents
+            # over-parameterized K=5 MDNs from inflating predictive std with
+            # ghost components on unimodal yield distributions.
+            pi, sigma, mu = mdn_prune_components(pi, sigma, mu)
+            logger.info(f"Model outputs (post-prune): pi={pi}, sigma={sigma}, mu={mu}")
             # Use the safe estimator: detects bimodal distributions and refuses
             # to return a valley-mean that sits between two real scenarios.
             predicted_yield, bimodality_report = mdn_safe_point_estimate(pi, sigma, mu)

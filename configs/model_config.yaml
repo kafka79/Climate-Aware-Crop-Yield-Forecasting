@@ -13,7 +13,7 @@ transformer:
   jitter_noise_scale: 0.1
 
 mdn:
-  num_mixtures: 5  # Number of Gaussian components for yield distribution
+  num_mixtures: 5  # Max Gaussian components. Low-weight components (pi_k < 0.05) are dynamically pruned at inference. Use select_optimal_mixtures() BIC search during training to auto-select K.
   hidden_dim: 128
   output_dim: 1  # Predicted Crop Yield
 
