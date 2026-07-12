@@ -19,6 +19,19 @@ The SageMaker job:
     then uploads the checkpoint back to S3.
   - Respects OIDC-sourced credentials (no static keys).
 
+Zero-Waiting Webhook Architecture (Task 6):
+  By default, blocking a GitHub runner to wait for a 4-hour training job wastes
+  significant compute minutes. To prevent this, use `--no-wait` to submit the job and exit immediately.
+  To receive notifications when training finishes without polling:
+  1. Set up an AWS EventBridge API Destination targeting:
+     POST https://api.github.com/repos/<owner>/<repo>/dispatches
+  2. Configure headers (Authorization: token <GITHUB_PAT>, User-Agent, Accept: application/vnd.github+json).
+  3. Create an EventBridge Rule:
+     - Event source: aws.sagemaker
+     - Event pattern: {"source": ["aws.sagemaker"], "detail-type": ["SageMaker Training Job State Change"]}
+     - Target: API Destination configured above.
+  4. Trigger a downstream GitHub workflow on `repository_dispatch` to sync best_model.pth back from S3.
+
 Exit codes:
   0 → SageMaker job completed successfully
   1 → SageMaker job failed

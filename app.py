@@ -197,10 +197,7 @@ hr {{ border:none; border-top:1px solid var(--border-color); margin:1.5rem 0; }}
 
 # ── Flaw C3 Fix: Connection-loss monitor ─────────────────────────────────────
 # Uses st.components.v1.html with a self-contained <script> that monitors
-# Streamlit's WebSocket heartbeat via the documented window.parent mechanism.
-# This replaces the previous brittle st.markdown JS injection that could fail
-# on stream reruns and cause rendering glitches.  The component is rendered
-# once as a zero-height iframe, avoiding interference with the layout.
+# network connectivity natively using navigator.onLine and standard heartbeats.
 import streamlit.components.v1 as components
 
 _CONNECTION_MONITOR_HTML = """
@@ -227,27 +224,49 @@ _CONNECTION_MONITOR_HTML = """
 (function() {
     var banner = document.getElementById('conn-banner');
     var overlay = document.getElementById('conn-overlay');
-    var lastPong = Date.now();
-    var CHECK_INTERVAL = 3000;  // check every 3s
-    var TIMEOUT = 8000;         // consider disconnected after 8s without heartbeat
+    var CHECK_INTERVAL = 3000;
+    
+    function setDisconnected() {
+        banner.style.display = 'block';
+        overlay.style.display = 'block';
+    }
+    
+    function setConnected() {
+        banner.style.display = 'none';
+        overlay.style.display = 'none';
+    }
 
-    // Listen for Streamlit's internal WebSocket messages via postMessage
-    window.addEventListener('message', function(e) {
-        if (e.data && (e.data.type === 'streamlit:render' || e.data.stCommVersion)) {
-            lastPong = Date.now();
+    function checkConnection() {
+        if (!navigator.onLine) {
+            setDisconnected();
+            return;
         }
-    });
+        
+        // Heartbeat ping to server to verify WebSocket/HTTP server connectivity
+        var controller = new AbortController();
+        var timeoutId = setTimeout(function() {
+            controller.abort();
+            setDisconnected();
+        }, 5000); // 5s timeout
 
-    setInterval(function() {
-        var elapsed = Date.now() - lastPong;
-        if (elapsed > TIMEOUT) {
-            banner.style.display = 'block';
-            overlay.style.display = 'block';
-        } else {
-            banner.style.display = 'none';
-            overlay.style.display = 'none';
-        }
-    }, CHECK_INTERVAL);
+        fetch('/', { method: 'HEAD', signal: controller.signal })
+            .then(function(response) {
+                clearTimeout(timeoutId);
+                setConnected();
+            })
+            .catch(function(err) {
+                clearTimeout(timeoutId);
+                setDisconnected();
+            });
+    }
+
+    // Periodically ping
+    setInterval(checkConnection, CHECK_INTERVAL);
+    
+    window.addEventListener('online', checkConnection);
+    window.addEventListener('offline', setDisconnected);
+    
+    checkConnection();
 })();
 </script>
 """
@@ -554,6 +573,19 @@ with right:
             for adv in prediction.get("recommendations", []):
                 cc = "critical" if any(k in adv.lower() for k in ["emergency","🚨"]) else "warning" if any(k in adv.lower() for k in ["warning","⚠️","volatility"]) else ""
                 st.markdown(f'<div class="advice-item {cc}">{adv}</div>', unsafe_allow_html=True)
+                
+            f_sim = prediction.get("financial_simulation")
+            if f_sim:
+                st.subheader("Economic Value of This Forecast")
+                st.markdown(
+                    f'<div class="info-card" style="border-left: 3px solid #16a34a;">'
+                    f'💵 **Estimated Net Value Added:** <strong>${f_sim["net_economic_benefit_usd"]:,.0f} USD</strong> '
+                    f'(${f_sim["net_benefit_per_ha_usd"]:,.1f} USD/ha)<br>'
+                    f'• Saved on Fertilizer/Inputs: <strong>${f_sim["saved_input_cost_usd"]:,.0f} USD</strong><br>'
+                    f'• Spoilage Loss Prevented: <strong>${f_sim["spoilage_loss_prevented_usd"]:,.0f} USD</strong>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
         else:
             # Analyst / Policy-Maker: full technical attribution and recommendations
             st.subheader("What Drove This Forecast")
@@ -568,6 +600,21 @@ with right:
             for adv in prediction.get("recommendations", []):
                 cc = "critical" if any(k in adv.lower() for k in ["emergency","🚨"]) else "warning" if any(k in adv.lower() for k in ["warning","⚠️","volatility"]) else ""
                 st.markdown(f'<div class="advice-item {cc}">{adv}</div>', unsafe_allow_html=True)
+                
+            f_sim = prediction.get("financial_simulation")
+            if f_sim:
+                st.subheader("A/B Economic Value Simulation")
+                st.markdown(
+                    f'<div class="info-card">'
+                    f'📊 **Simulation parameters:** 1,000 ha area | $350/ton price | $150/ha input cost baseline<br><hr style="margin: 0.5rem 0;">'
+                    f'💵 **Saved Input Cost:** ${f_sim["saved_input_cost_usd"]:,.2f} USD<br>'
+                    f'🌾 **Spoilage Loss Prevented:** ${f_sim["spoilage_loss_prevented_usd"]:,.2f} USD<br>'
+                    f'🛡️ **Insurance Discount:** ${f_sim["insurance_discount_usd"]:,.2f} USD<br>'
+                    f'🏆 **Net Economic Benefit:** <strong>${f_sim["net_economic_benefit_usd"]:,.2f} USD</strong> '
+                    f'(${f_sim["net_benefit_per_ha_usd"]:,.2f} USD/ha)'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
     else:
         st.subheader("Getting Started")
         st.markdown('<div class="info-card">This dashboard does not fabricate predictions.<br><br><strong>To see a forecast:</strong><br>1. Select a region with processed data<br>2. Choose a year covered by the feature store<br>3. Press <strong>Run Forecast</strong></div>', unsafe_allow_html=True)

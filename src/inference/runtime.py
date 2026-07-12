@@ -762,13 +762,18 @@ def _prepare_model_inputs(
             f"but the checkpoint expects {weather_dim}."
         )
 
+    weather_data_slice = weather_data[:, :weather_dim]
+    if config.get("use_physical_lags", True):
+        from src.temporal.timeseries_dataset import _apply_physical_lags_numpy
+        weather_data_slice = _apply_physical_lags_numpy(weather_data_slice)
+
     soil_vector, soil_source, soil_warnings = _load_soil_vector(config, region, soil_dim)
 
     result = {
         "sat_hist": sat_hist,
         "sat_tensor": torch.tensor(sat_data[:, :sat_dim], dtype=torch.float32).unsqueeze(0),
         "weather_tensor": torch.tensor(
-            weather_data[:, :weather_dim], dtype=torch.float32
+            weather_data_slice, dtype=torch.float32
         ).unsqueeze(0),
         "soil_tensor": torch.tensor(soil_vector, dtype=torch.float32).unsqueeze(0),
         "soil_source": soil_source,
@@ -1052,15 +1057,36 @@ def run_inference(
         # Surface modality warnings so the dashboard/CLI can show them
         modality_warnings = prepared.get("modality_warnings", [])
 
-        engine = RecommendationEngine(config)
-        advice = engine.generate_advice({
+        # Build context-aware advice payload (Task 3)
+        advice_payload = {
             "region": region,
             "predicted_yield": predicted_yield,
             "lower_bound": lower_bound,
             "upper_bound": upper_bound,
             "risk": risk,
-            "attribution": attribution
-        })
+            "attribution": attribution,
+            "soil_features": soil_tensor.squeeze(0).cpu().tolist(),
+            "weather_features": weather_tensor.squeeze(0).cpu().tolist() if weather_tensor.dim() >= 2 else None
+        }
+
+        engine = RecommendationEngine(config)
+        advice = engine.generate_advice(advice_payload)
+
+        # Run Financial Attribution Simulation (Task 4)
+        from src.recommendation.engine import FinancialAttributionSimulator
+        sim_config = config.get("recommendation", {}).get("financial_simulation", {})
+        area_ha = float(sim_config.get("area_ha", 1000.0))
+        price_per_ton = float(sim_config.get("price_per_ton", 350.0))
+        input_cost_per_ha = float(sim_config.get("input_cost_per_ha", 150.0))
+        
+        financial_sim = FinancialAttributionSimulator.simulate_net_benefit(
+            predicted_yield=predicted_yield,
+            predicted_std=predicted_std,
+            historical_average=historical_average,
+            area_ha=area_ha,
+            price_per_ton=price_per_ton,
+            input_cost_per_ha=input_cost_per_ha
+        )
 
         tracker.set_attribute("predicted_yield", predicted_yield)
         tracker.set_attribute("prediction_std", predicted_std)
@@ -1136,5 +1162,6 @@ def run_inference(
             "modality_warnings": modality_warnings,
             "bimodality_report": bimodality_report,
             "gmm_params": gmm_params,
+            "financial_simulation": financial_sim,
             "source": "checkpoint+zarr",
         }

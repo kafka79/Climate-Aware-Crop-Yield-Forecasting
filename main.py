@@ -84,6 +84,16 @@ def main(args):
                 print(f"    • {m:.2f} t/ha  ({w:.0%} probability){marker}")
             print("  The forecast shows the dominant scenario.")
             print("  Investigate satellite + weather signals independently for each scenario.")
+        if result.get("financial_simulation"):
+            f_sim = result["financial_simulation"]
+            print("-" * 50)
+            print("ECONOMIC VALUE & A/B SIMULATION METRICS:")
+            print(f"  Saved Input Cost:           ${f_sim['saved_input_cost_usd']:,.2f} USD")
+            print(f"  Spoilage Loss Prevented:    ${f_sim['spoilage_loss_prevented_usd']:,.2f} USD")
+            print(f"  Insurance Discount:         ${f_sim['insurance_discount_usd']:,.2f} USD")
+            print(f"  Net Economic Benefit:       ${f_sim['net_economic_benefit_usd']:,.2f} USD")
+            print(f"  Net Benefit per Hectare:    ${f_sim['net_benefit_per_ha_usd']:,.2f} USD/ha")
+
         print("-" * 50)
         print("AGRONOMIC ADVICE & RECOMMENDATIONS:")
         for advice in result.get("recommendations", []):

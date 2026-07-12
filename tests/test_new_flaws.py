@@ -281,3 +281,95 @@ def test_app_no_false_offline_claim():
     source = inspect.getsource(app)
     assert "Offline Workspace" not in source, "Must not claim misleading 'Offline Workspace'"
     assert "Edge Client" in source, "Should honestly label as 'Edge Client (PWA)'"
+
+
+# 13. Test physical weather lag transformations
+def test_physical_weather_lags():
+    from src.temporal.timeseries_dataset import _apply_physical_lags_numpy
+    # Create simple mock weather data: 5 timesteps, 3 features (tmax, tmin, precip)
+    w_data = np.array([
+        [20.0, 10.0, 10.0],
+        [22.0, 11.0, 0.0],
+        [21.0, 12.0, 50.0],
+        [23.0, 13.0, 0.0],
+        [20.0, 10.0, 20.0]
+    ])
+    
+    transformed = _apply_physical_lags_numpy(w_data)
+    assert transformed.shape == w_data.shape
+    
+    # 1. Soil moisture should decay/accumulate:
+    # t=0: 10
+    # t=1: 10 * 0.8 + 0 = 8.0
+    # t=2: 8 * 0.8 + 50 = 56.4
+    assert abs(transformed[1, 2] - 8.0) < 1e-4
+    assert abs(transformed[2, 2] - 56.4) < 1e-4
+    
+    # 2. Thermal accumulation should calculate GDD correctly
+    # tmean = 15, base 10 -> GDD = 5.0
+    # t=0: 5.0
+    assert transformed[0, 0] > 0.0
+
+
+# 14. Test FinancialAttributionSimulator computations
+def test_financial_simulator():
+    from src.recommendation.engine import FinancialAttributionSimulator
+    
+    # Under-performing year (Drought Scenario)
+    res = FinancialAttributionSimulator.simulate_net_benefit(
+        predicted_yield=2.0,
+        predicted_std=0.2,
+        historical_average=4.0,
+        area_ha=100.0,
+        price_per_ton=300.0,
+        input_cost_per_ha=200.0
+    )
+    # Predicted yield is 2.0 (50% of history). Proportion = 0.5.
+    # Saved Input Cost = 100 * 200 * (1 - 0.5) = 10000.0
+    # Insurance saving = 100 * 10 = 1000.0 (std=0.2 < 0.5)
+    # Spoilage prevented = 0.0
+    # Net benefit = 11000.0
+    assert res["saved_input_cost_usd"] == 10000.0
+    assert res["insurance_discount_usd"] == 1000.0
+    assert res["spoilage_loss_prevented_usd"] == 0.0
+    assert res["net_economic_benefit_usd"] == 11000.0
+    
+    # Over-performing year (Surplus Scenario)
+    res_surplus = FinancialAttributionSimulator.simulate_net_benefit(
+        predicted_yield=6.0,
+        predicted_std=0.3,
+        historical_average=4.0,
+        area_ha=100.0,
+        price_per_ton=300.0,
+        input_cost_per_ha=200.0
+    )
+    # Surplus tons = (6.0 - 4.0) * 100 = 200 tons
+    # Spoilage prevented = 200 * 0.15 * 300 = 9000.0
+    # Insurance saving = 100 * 10 = 1000.0
+    # Saved inputs = 0.0
+    # Net benefit = 10000.0
+    assert res_surplus["spoilage_loss_prevented_usd"] == 9000.0
+    assert res_surplus["saved_input_cost_usd"] == 0.0
+    assert res_surplus["net_economic_benefit_usd"] == 10000.0
+
+
+# 15. Test dynamic calibrated recommendation engine
+def test_dynamic_recommendations():
+    from src.recommendation.engine import RecommendationEngine
+    engine = RecommendationEngine({"paths": {"raw": {"soil": "data/raw/soil"}}})
+    
+    # Test Acidic pH advice
+    res = {
+        "region": "Burdwan, West Bengal",
+        "predicted_yield": 3.0,
+        "lower_bound": 2.0,
+        "upper_bound": 4.0,
+        "risk": "Moderate Risk",
+        "attribution": {"Weather": 0.6, "Satellite": 0.2, "Soil": 0.2},
+        "soil_features": [5.2, 12.0, 1.2], # pH 5.2 (acidic)
+        "weather_features": [[20.0, 10.0, 180.0]] # precip spike
+    }
+    
+    advice = engine.generate_advice(res)
+    assert any("Acidification" in a for a in advice), "Should trigger Acidification advice"
+    assert any("Precipitation Spike" in a for a in advice), "Should trigger Precipitation Spike advice"

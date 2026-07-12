@@ -9,6 +9,45 @@ import queue as _queue
 from loguru import logger
 from typing import Iterator
 
+def _apply_physical_lags_numpy(w_data: np.ndarray) -> np.ndarray:
+    """
+    Applies first-principles physical lag models on weather features (tmax, tmin, precip).
+    Input w_data: shape (T, C) where C >= 3: [tmax, tmin, precip, ...]
+    - Precip is transformed into a soil moisture retention index using an exponential decay model:
+      S_t = S_{t-1} * alpha + P_t, where alpha is the soil water retention coefficient (e.g., 0.8)
+    - Temperature (tmax/tmin) is smoothed using an accumulated thermal heat proxy.
+    """
+    T, C = w_data.shape
+    if C < 3:
+        return w_data
+        
+    w_transformed = w_data.copy()
+    
+    # 1. Soil moisture retention index (exponential decay on precipitation)
+    precip = w_data[:, 2]
+    soil_moisture = np.zeros_like(precip)
+    current_sm = 0.0
+    alpha = 0.8  # daily soil water retention factor
+    for t in range(T):
+        current_sm = current_sm * alpha + precip[t]
+        soil_moisture[t] = current_sm
+    w_transformed[:, 2] = soil_moisture
+    
+    # 2. Accumulated growing degree days / smoothed thermal stress (mean of tmax and tmin)
+    tmean = 0.5 * (w_data[:, 0] + w_data[:, 1])
+    thermal_accumulation = np.zeros_like(tmean)
+    current_thermal = 0.0
+    beta = 0.9  # heat accumulation factor
+    for t in range(T):
+        current_thermal = current_thermal * beta + max(0.0, tmean[t] - 10.0) # base 10C for crop development
+        thermal_accumulation[t] = current_thermal
+    
+    w_transformed[:, 0] = thermal_accumulation
+    w_transformed[:, 1] = tmean
+    
+    return w_transformed
+
+
 class MultiModalCropIterableDataset(IterableDataset):
     """
     PyTorch IterableDataset for multi-modal crop yield prediction.
@@ -71,13 +110,19 @@ class MultiModalCropIterableDataset(IterableDataset):
         if len(worker_df) == 0:
             return iter([])
 
-        # ponytail: prefetch next chunk in background thread while yielding current chunk
         chunk_boundaries = list(range(0, len(worker_df), self.chunk_size))
 
-        # Pre-start first chunk load
-        prefetch_q = _queue.Queue(maxsize=1)
-        first_chunk_df = worker_df.iloc[chunk_boundaries[0]:chunk_boundaries[0] + self.chunk_size]
-        t = threading.Thread(target=self._prefetch_chunk, args=(first_chunk_df, prefetch_q), daemon=True)
+        # Determine prefetch queue depth from config
+        prefetch_depth = int(self.config.get("training", {}).get("prefetch_queue_depth", 4))
+        prefetch_q = _queue.Queue(maxsize=prefetch_depth)
+
+        # Persistent background thread loading chunks sequentially
+        def producer_worker():
+            for c_start in chunk_boundaries:
+                c_df = worker_df.iloc[c_start:c_start + self.chunk_size]
+                self._prefetch_chunk(c_df, prefetch_q)
+        
+        t = threading.Thread(target=producer_worker, daemon=True)
         t.start()
 
         for ci, chunk_start in enumerate(chunk_boundaries):
@@ -89,15 +134,6 @@ class MultiModalCropIterableDataset(IterableDataset):
             if isinstance(result, Exception):
                 raise result
             sat_pixels, weather_pixels = result
-
-            # Start prefetching next chunk while we yield current samples
-            next_ci = ci + 1
-            if next_ci < len(chunk_boundaries):
-                prefetch_q = _queue.Queue(maxsize=1)
-                next_start = chunk_boundaries[next_ci]
-                next_chunk_df = worker_df.iloc[next_start:next_start + self.chunk_size]
-                t = threading.Thread(target=self._prefetch_chunk, args=(next_chunk_df, prefetch_q), daemon=True)
-                t.start()
 
             for i, (_, row) in enumerate(chunk_df.iterrows()):
                 yield_time = pd.to_datetime(row["time"])
@@ -137,11 +173,18 @@ class MultiModalCropIterableDataset(IterableDataset):
                             padded[:, :, :h, :w] = sat_data
                             sat_data = padded
                         sat_tensor = torch.tensor(sat_data, dtype=torch.float32)
+                        
                         w_data = w_hist.to_array().values.T
+                        if self.config.get("use_physical_lags", True):
+                            w_data = _apply_physical_lags_numpy(w_data)
+                            
                         weather_tensor = torch.tensor(w_data, dtype=torch.float32)
                     else:
                         sat_data = sat_hist.to_array().values.T
                         w_data = w_hist.to_array().values.T
+                        if self.config.get("use_physical_lags", True):
+                            w_data = _apply_physical_lags_numpy(w_data)
+                            
                         X = np.hstack([sat_data, w_data])
                         sat_tensor = torch.tensor(X[:, :self.C], dtype=torch.float32)
                         weather_tensor = torch.tensor(X[:, self.C:], dtype=torch.float32)

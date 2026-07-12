@@ -136,8 +136,10 @@ class RecommendationEngine:
 
     def _generate_heuristic_advice(self, result: Dict[str, Any]) -> List[str]:
         """
-        A sophisticated heuristic engine that maps attribution and risk to specific agronomic advice.
+        A sophisticated heuristic engine that maps attribution, risk, and specific
+        soil/weather parameters to dynamic, context-aware agronomic advice.
         """
+        import numpy as np
         advice = []
         attr = result["attribution"]
         risk = str(result.get("risk", "")).upper()
@@ -152,13 +154,45 @@ class RecommendationEngine:
         elif top_factor == "Soil":
             advice.append(f"🌱 **Soil Constraints ({attr['Soil']:.0%}):** Soil composition limits regional yield ceiling. To bypass root absorption constraints, apply a customized foliar spray of micro-nutrients (specifically Zinc and Boron) alongside a targeted mid-season NPK top-dress.")
 
-        # 2. Risk-Based Logic
+        # 2. Dynamic Feature-Level Agronomic Calibration
+        soil_feats = result.get("soil_features")
+        if soil_feats and len(soil_feats) >= 3:
+            ph, soc, nitrogen = soil_feats[0], soil_feats[1], soil_feats[2]
+            
+            # pH-based dynamic recommendation
+            if ph < 5.8:
+                advice.append(f"🧪 **Soil Acidification Alert (pH={ph:.1f}):** Highly acidic soil detected. Apply agricultural lime (calcium carbonate) at a rate of 2-3 tons/ha to neutralize acidity and raise pH, unlocking phosphorus availability.")
+            elif ph > 7.5:
+                advice.append(f"🧪 **Soil Alkalinity Alert (pH={ph:.1f}):** Alkaline soil detected. Apply elemental sulfur or ammonium sulfate to reduce pH and prevent iron/manganese lockup.")
+            
+            # SOC-based dynamic recommendation
+            if soc < 10.0:
+                advice.append(f"🍂 **Organic Carbon Deficiency (SOC={soc:.1f} g/kg):** Low soil organic carbon. Integrate cover crops (like green manure) and apply composted crop residues to restore soil structure and biological activity.")
+                
+            # Nitrogen-based dynamic recommendation
+            if nitrogen < 1.0:
+                advice.append(f"🌿 **Nitrogen Deficit (N={nitrogen:.2f} g/kg):** Critical nitrogen depletion. Supplement with split-application urea (e.g. 50 kg/ha at tillering and panicle initiation) to restore leaf canopy health.")
+
+        # Weather-based dynamic recommendation
+        weather_feats = result.get("weather_features")
+        if weather_feats:
+            w_arr = np.array(weather_feats)
+            if w_arr.ndim == 2 and w_arr.shape[1] >= 3:
+                # precip is index 2, tmax is 0, tmin is 1
+                recent_precip_sum = float(w_arr[-3:, 2].sum())
+                
+                if recent_precip_sum > 150.0:
+                    advice.append(f"🌧️ **Precipitation Spike Detected ({recent_precip_sum:.1f} mm):** Heavy rain in the recent window. Monitor fields for waterlogging, clear drainage paths, and delay granular nitrogen fertilization to avoid run-off.")
+                elif recent_precip_sum < 10.0:
+                    advice.append(f"☀️ **Moisture Deficit (Precip={recent_precip_sum:.1f} mm):** Prolonged dry spell in recent observations. Prioritize dynamic irrigation scheduling or water conservation practices.")
+
+        # 3. Risk-Based Logic
         if "HIGH" in risk:
             advice.append("🚨 **Emergency Action:** Yield is significantly below trend. Conduct a soil-moisture profile audit and check leaf tissue for nitrogen deficiency. Consider micro-irrigation or nitrogen foliar application if stress is confirmed.")
         elif "LOW" in risk:
             advice.append("📈 **Surplus Preparation:** Expected yield is above average. Coordinate storage facility capacity, source drying equipment early to prevent post-harvest mold, and engage local distribution networks to lock in optimal pricing.")
 
-        # 3. Uncertainty Logic (dimension-safe denominator to prevent ZeroDivisionError)
+        # 4. Uncertainty Logic (dimension-safe denominator to prevent ZeroDivisionError)
         predicted = result.get("predicted_yield", 0.0)
         denominator = max(abs(predicted), 0.01)  # never divide by zero regardless of model output
         range_pct = (result["upper_bound"] - result["lower_bound"]) / denominator
@@ -166,3 +200,55 @@ class RecommendationEngine:
             advice.append("⚠️ **Risk Hedging (Data Volatility):** High forecast variance indicates conflicting satellite and weather indicators. Postpone intensive fertilizer applications to avoid wasting inputs. Symmetrically prepare channels—clear drainage path (for potential wet spikes) and check pump readiness (for dry drops).")
 
         return advice
+
+
+class FinancialAttributionSimulator:
+    """
+    Simulates the economic value of precision forecasting vs a naive baseline strategy.
+    
+    Strategies:
+      1. Naive Strategy: Farmer acts on historical average yield.
+         - Over-applies fertilizer/inputs in drought years (wasted cost).
+         - Under-prepares storage/logistics in surplus years (loss from mold/spoilage).
+      2. Precision Strategy: Farmer acts on our probabilistic forecast.
+         - Reduces fertilizer/inputs when low yield is forecast (saves input costs).
+         - Secures drying & storage in advance when high yield is forecast (prevents spoilage).
+    """
+    @staticmethod
+    def simulate_net_benefit(
+        predicted_yield: float,
+        predicted_std: float,
+        historical_average: float,
+        area_ha: float = 1000.0,
+        price_per_ton: float = 350.0,
+        input_cost_per_ha: float = 150.0
+    ) -> Dict[str, Any]:
+        if historical_average is None or historical_average <= 0.0:
+            historical_average = 3.0  # sensible historical default
+            
+        # Naive behavior: assumes historical average
+        # Precision behavior: adapts based on predicted yield
+        
+        # Scenario A: Drought/Low Yield (Prediction < History)
+        if predicted_yield < historical_average:
+            proportion = max(0.2, predicted_yield / (historical_average + 1e-8))
+            saved_input_cost = area_ha * input_cost_per_ha * (1.0 - proportion)
+            loss_prevented = 0.0
+        # Scenario B: Surplus/High Yield (Prediction > History)
+        else:
+            surplus_tons = (predicted_yield - historical_average) * area_ha
+            loss_prevented = surplus_tons * 0.15 * price_per_ton
+            saved_input_cost = 0.0
+            
+        # Value of reduced uncertainty: securing crop insurance premium discounts
+        insurance_saving = area_ha * 10.0 if predicted_std < 0.5 else 0.0
+        
+        net_benefit = saved_input_cost + loss_prevented + insurance_saving
+        
+        return {
+            "saved_input_cost_usd": round(saved_input_cost, 2),
+            "spoilage_loss_prevented_usd": round(loss_prevented, 2),
+            "insurance_discount_usd": round(insurance_saving, 2),
+            "net_economic_benefit_usd": round(net_benefit, 2),
+            "net_benefit_per_ha_usd": round(net_benefit / area_ha, 2)
+        }
