@@ -185,13 +185,15 @@ def _find_modes_gradient_ascent(
     K, O = mu.shape
     candidates = []
 
-    # ponytail: scale lr by min sigma to prevent gradient explosion when sigma ~ 1e-4
-    min_sigma = float(sigma.min().clamp(min=1e-6))
-    effective_lr = lr * min_sigma
-
+    # ponytail: scale lr by component-specific min sigma to prevent gradient explosion without choking others
     for k in range(K):
         if float(pi[k]) < 1e-6:
             continue
+        
+        # Dynamically scale learning rate based on this specific component's variance
+        k_min_sigma = float(sigma[k].min().clamp(min=1e-6))
+        effective_lr = lr * k_min_sigma
+        
         # Initialise at component mean
         y = mu[k].clone().detach().requires_grad_(True)
 
@@ -210,7 +212,7 @@ def _find_modes_gradient_ascent(
                     break
                 step = effective_lr * grad
                 # Clamp step to prevent overshooting beyond component basins
-                step = step.clamp(-min_sigma * 2, min_sigma * 2)
+                step = step.clamp(-k_min_sigma * 2, k_min_sigma * 2)
                 y = (y + step).detach().requires_grad_(True)
                 if float(step.abs().max()) < convergence_tol:
                     break
@@ -357,6 +359,8 @@ def mdn_detect_bimodality(
       - each carrying >= weight_threshold of total probability mass, AND
       - separated by >= separation_threshold standard deviations of the mixture.
 
+    Supports multi-dimensional outputs (O >= 1) correctly.
+
     Args:
         pi:    (B, K)    mixing coefficients
         sigma: (B, K, O) component std-devs
@@ -370,7 +374,6 @@ def mdn_detect_bimodality(
     """
     import numpy as np
 
-    # Standardize input dimensions to 2D (Batch, Component)
     is_single = False
     if pi.dim() == 1:
         pi = pi.unsqueeze(0)
@@ -380,46 +383,17 @@ def mdn_detect_bimodality(
     elif pi.size(0) == 1:
         is_single = True
 
-    B, K = pi.shape
+    B, K, O = mu.shape
     device = pi.device
 
-    # Convert sigma/mu to (B, K) since output_dim O = 1
-    sigmas = sigma[..., 0]  # (B, K)
-    means = mu[..., 0]      # (B, K)
-
-    # Determine dynamic range for each batch item: min(mu - 3*sigma) to max(mu + 3*sigma)
-    y_min = torch.min(means - 3.0 * sigmas, dim=1).values
-    y_max = torch.max(means + 3.0 * sigmas, dim=1).values
-    y_min = torch.clamp(y_min, min=0.0)
-    y_max = torch.clamp(y_max, min=0.1)
-
-    # Construct linear grid of shape (B, 200) on device
-    steps = torch.linspace(0.0, 1.0, steps=200, device=device)
-    grid = y_min.unsqueeze(1) + steps.unsqueeze(0) * (y_max - y_min).unsqueeze(1)  # (B, 200)
-
-    # Evaluate GMM PDF in a vectorized tensor operation across the entire batch
-    grid_uns = grid.unsqueeze(1)       # (B, 1, 200)
-    means_uns = means.unsqueeze(2)     # (B, K, 1)
-    sigmas_uns = sigmas.unsqueeze(2)   # (B, K, 1)
-    pi_uns = pi.unsqueeze(2)           # (B, K, 1)
-
-    exponent = -0.5 * ((grid_uns - means_uns) / sigmas_uns).pow(2)
-    coeff = pi_uns / (sigmas_uns * math.sqrt(2.0 * math.pi))
-    pdf = torch.sum(coeff * torch.exp(exponent), dim=1)  # (B, 200)
-
     reports = []
-    
+
     # Detach and move to CPU/numpy just for final scalar metrics extraction
     pi_np = pi.detach().cpu().numpy()
-    sigmas_np = sigmas.detach().cpu().numpy()
-    means_np = means.detach().cpu().numpy()
-    pdf_np = pdf.detach().cpu().numpy()
-    grid_np = grid.detach().cpu().numpy()
+    sigmas_np = sigma.detach().cpu().numpy()
+    means_np = mu.detach().cpu().numpy()
 
     for i in range(B):
-        pdf_i = pdf_np[i]
-        grid_i = grid_np[i]
-        
         # Find local maxima (peaks) via gradient ascent
         modes_asc = _find_modes_gradient_ascent(
             pi[i],
@@ -428,7 +402,7 @@ def mdn_detect_bimodality(
         )
         peaks = []
         for log_d, pos in modes_asc:
-            peaks.append((float(pos[0].item()), float(math.exp(log_d))))
+            peaks.append((pos.detach().cpu().numpy(), float(math.exp(log_d))))
 
         # Sort peaks by density value descending
         peaks.sort(key=lambda x: x[1], reverse=True)
@@ -440,19 +414,22 @@ def mdn_detect_bimodality(
         s_t = sigmas_np[i]
         m_t = means_np[i]
 
-        expected_val = float((pi[i].unsqueeze(-1) * mu[i]).sum().item())
+        expected_val = (w_t[:, None] * m_t).sum(axis=0)
         dominant_mode = expected_val
 
         # Calculate standard deviation of the mixture
-        second_moment = float((pi[i].unsqueeze(-1) * (sigma[i].pow(2) + mu[i].pow(2))).sum().item())
+        second_moment = (w_t[:, None] * (s_t**2 + m_t**2)).sum(axis=0)
         mix_var = second_moment - expected_val**2
-        mix_std = math.sqrt(max(mix_var, 1e-6))
+        mix_var = np.maximum(mix_var, 1e-6)
+        mix_std = np.sqrt(mix_var)
+        mix_std_norm = np.linalg.norm(mix_std)
 
         # Find unique significant modes by mapping peaks back to closest components
         significant = []
         seen_indices = set()
         for peak_y, peak_pdf in peaks:
-            closest_idx = int(np.argmin(np.abs(m_t - peak_y)))
+            distances = np.linalg.norm(m_t - peak_y, axis=1)
+            closest_idx = int(np.argmin(distances))
             if closest_idx not in seen_indices:
                 seen_indices.add(closest_idx)
                 w = float(w_t[closest_idx])
@@ -466,27 +443,45 @@ def mdn_detect_bimodality(
             y_top2, p_top2 = peaks[1]
 
             if p_top2 >= 0.1 * p_top1:
-                idx_1 = np.argmin(np.abs(grid_i - y_top1))
-                idx_2 = np.argmin(np.abs(grid_i - y_top2))
-                start_idx, end_idx = min(idx_1, idx_2), max(idx_1, idx_2)
+                # Evaluate PDF along the line segment between y_top1 and y_top2
+                steps = np.linspace(0.0, 1.0, 100)
+                grid_i = y_top1[None, :] + steps[:, None] * (y_top2 - y_top1)[None, :]
+                
+                # Evaluate PDF at grid_i
+                diff = grid_i[:, None, :] - m_t[None, :, :]
+                exponent = -0.5 * np.sum((diff / s_t[None, :, :])**2, axis=2)
+                
+                # Normalization constant
+                log_norm = -O * 0.5 * np.log(2.0 * np.pi) - np.sum(np.log(s_t), axis=1)
+                
+                log_components = np.log(w_t + 1e-10) + log_norm + exponent
+                # logsumexp for stability
+                max_log_c = np.max(log_components, axis=1, keepdims=True)
+                pdf_line = np.exp(max_log_c[:, 0]) * np.sum(np.exp(log_components - max_log_c), axis=1)
+                
+                valley_idx = np.argmin(pdf_line)
+                pdf_valley = pdf_line[valley_idx]
 
-                if end_idx > start_idx + 1:
-                    valley_idx = start_idx + np.argmin(pdf_i[start_idx:end_idx + 1])
-                    pdf_valley = pdf_i[valley_idx]
+                if pdf_valley < 0.8 * min(p_top1, p_top2):
+                    closest_idx1 = int(np.argmin(np.linalg.norm(m_t - y_top1, axis=1)))
+                    closest_idx2 = int(np.argmin(np.linalg.norm(m_t - y_top2, axis=1)))
+                    top_w = float(w_t[closest_idx1])
+                    sec_w = float(w_t[closest_idx2])
 
-                    if pdf_valley < 0.8 * min(p_top1, p_top2):
-                        closest_idx1 = int(np.argmin(np.abs(m_t - y_top1)))
-                        closest_idx2 = int(np.argmin(np.abs(m_t - y_top2)))
-                        top_w = float(w_t[closest_idx1])
-                        sec_w = float(w_t[closest_idx2])
+                    pooled_sigma_var = (top_w * s_t[closest_idx1]**2 + sec_w * s_t[closest_idx2]**2) / (top_w + sec_w + 1e-8)
+                    pooled_sigma = np.sqrt(np.sum(pooled_sigma_var))
+                    
+                    effective_std = min(mix_std_norm, 4.0 * pooled_sigma)
+                    distance = np.linalg.norm(y_top1 - y_top2)
+                    if distance >= separation_threshold * effective_std:
+                        is_bimodal = True
+                        valley_depth = float(1.0 - pdf_valley / (min(p_top1, p_top2) + 1e-8))
+                        dominant_mode = y_top1
 
-                        pooled_sigma = math.sqrt((top_w * s_t[closest_idx1]**2 + sec_w * s_t[closest_idx2]**2) / (top_w + sec_w + 1e-8))
-                        effective_std = min(mix_std, 4.0 * pooled_sigma)
-                        distance = abs(y_top1 - y_top2)
-                        if distance >= separation_threshold * effective_std:
-                            is_bimodal = True
-                            valley_depth = float(1.0 - pdf_valley / (min(p_top1, p_top2) + 1e-8))
-                            dominant_mode = y_top1
+        if O == 1:
+            dominant_mode = float(dominant_mode[0])
+            for k in range(len(significant)):
+                significant[k] = (significant[k][0], float(significant[k][1][0]))
 
         reports.append({
             "is_bimodal": is_bimodal,
@@ -515,22 +510,33 @@ def mdn_safe_point_estimate(
         If batch size is 1: (point_estimate, bimodality_report)
         If batch size > 1: (list_of_point_estimates, list_of_bimodality_reports)
     """
+    def fmt(vec):
+        import numpy as np
+        if isinstance(vec, float) or (hasattr(vec, 'ndim') and vec.ndim == 0):
+            return f"{float(vec):.2f}"
+        elif hasattr(vec, '__len__'):
+            return "[" + ", ".join(f"{float(v):.2f}" for v in vec) + "]"
+        else:
+            return f"{float(vec):.2f}"
+
     if pi.dim() == 1 or pi.size(0) == 1:
         report = mdn_detect_bimodality(pi, sigma, mu, separation_threshold, weight_threshold)
         p_tensor = mdn_expected_value(pi if pi.dim() == 2 else pi.unsqueeze(0), 
                                       sigma if sigma.dim() == 3 else sigma.unsqueeze(0), 
                                       mu if mu.dim() == 3 else mu.unsqueeze(0))
-        valley_mean = float(p_tensor[0, 0].item())
+        valley_mean = p_tensor[0].detach().cpu().numpy()
+        if mu.shape[-1] == 1:
+            valley_mean = float(valley_mean[0])
 
         if report["is_bimodal"]:
             dominant = report["dominant_mode"]
             mode_list = ", ".join(
-                f"{m:.2f} t/ha (weight={w:.0%})" for w, m in report["modes"]
+                f"{fmt(m)} t/ha (weight={w:.0%})" for w, m in report["modes"]
             )
             msg = (
                 f"Bimodal yield distribution detected (valley depth={report['valley_depth']:.2f}). "
-                f"Weighted mean ({valley_mean:.2f} t/ha) falls between two distinct scenarios. "
-                f"Dominant mode: {dominant:.2f} t/ha. All significant modes: [{mode_list}]. "
+                f"Weighted mean ({fmt(valley_mean)} t/ha) falls between two distinct scenarios. "
+                f"Dominant mode: {fmt(dominant)} t/ha. All significant modes: [{mode_list}]. "
                 "Investigate satellite and weather signals independently for each scenario "
                 "before acting on this forecast."
             )
@@ -542,17 +548,22 @@ def mdn_safe_point_estimate(
     else:
         reports = mdn_detect_bimodality(pi, sigma, mu, separation_threshold, weight_threshold)
         points = []
+        p_tensor = mdn_expected_value(pi, sigma, mu).detach().cpu().numpy()
+        
         for i, report in enumerate(reports):
-            valley_mean = float(mdn_expected_value(pi[i:i+1], sigma[i:i+1], mu[i:i+1])[0, 0].item())
+            valley_mean = p_tensor[i]
+            if mu.shape[-1] == 1:
+                valley_mean = float(valley_mean[0])
+                
             if report["is_bimodal"]:
                 dominant = report["dominant_mode"]
                 mode_list = ", ".join(
-                    f"{m:.2f} t/ha (weight={w:.0%})" for w, m in report["modes"]
+                    f"{fmt(m)} t/ha (weight={w:.0%})" for w, m in report["modes"]
                 )
                 msg = (
                     f"Batch index {i}: Bimodal yield distribution detected (valley depth={report['valley_depth']:.2f}). "
-                    f"Weighted mean ({valley_mean:.2f} t/ha) falls between two distinct scenarios. "
-                    f"Dominant mode: {dominant:.2f} t/ha. All significant modes: [{mode_list}]."
+                    f"Weighted mean ({fmt(valley_mean)} t/ha) falls between two distinct scenarios. "
+                    f"Dominant mode: {fmt(dominant)} t/ha. All significant modes: [{mode_list}]."
                 )
                 warnings.warn(msg, BimodalDistributionWarning, stacklevel=2)
                 logger.warning(msg)
@@ -563,7 +574,7 @@ def mdn_safe_point_estimate(
 
 def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: torch.Tensor, entropy_weight: float = 0.0):
     """
-    Negative Log Likelihood (NLL) Loss for MDN with optional Entropy Regularization.
+    Negative Log Likelihood (NLL) Loss for MDN with closeness-scaled Entropy Regularization.
     target: (B, O)
     """
     # Calculate target standard deviation before expansion to adjust entropy_weight dynamically
@@ -600,11 +611,36 @@ def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: to
     loss = nll
     if entropy_weight > 0.0:
         # Entropy regularization: H = -sum(pi * log(pi)) is positive.
-        # ponytail: old code ADDED sum(pi*log_pi) which is negative, rewarding
-        # uniform distributions. Fixed: SUBTRACT it to penalize high entropy,
-        # encouraging confident unimodal predictions when warranted.
         entropy = -torch.sum(pi * log_pi, dim=1)  # H >= 0
-        loss = loss + (entropy_weight * dynamic_scale) * entropy
+        
+        # Calculate component closeness to scale entropy regularization.
+        # If components are far apart (bimodal/multimodal), closeness -> 0, reducing penalty.
+        # If components are clumped, closeness -> 1, keeping the penalty to avoid redundant components.
+        B, K, O = mu.shape
+        mu_expanded = mu.unsqueeze(2) # (B, K, 1, O)
+        mu_transposed = mu.unsqueeze(1) # (B, 1, K, O)
+        
+        # Pairwise distance scaled by sigma to get Mahalanobis-like distance
+        sigma_expanded = sigma.unsqueeze(2)
+        sigma_transposed = sigma.unsqueeze(1)
+        pooled_sigma = torch.sqrt((sigma_expanded**2 + sigma_transposed**2)/2.0 + 1e-8) # (B, K, K, O)
+        
+        # Pairwise Mahalanobis distance squared
+        mahal_dist_sq = torch.sum(((mu_expanded - mu_transposed) / pooled_sigma)**2, dim=-1) # (B, K, K)
+        
+        # Set diagonal to infinity so a component's distance to itself doesn't affect the min
+        diag_mask = torch.eye(K, device=mu.device).bool().unsqueeze(0).expand(B, K, K)
+        mahal_dist_sq.masked_fill_(diag_mask, float('inf'))
+        
+        if K > 1:
+            # Min distance between any two components
+            min_dist_sq = torch.min(mahal_dist_sq.view(B, -1), dim=1).values # (B,)
+            # closeness scale: e^(-min_dist_sq/4)
+            closeness_scale = torch.exp(-min_dist_sq / 4.0)
+        else:
+            closeness_scale = torch.ones(B, device=mu.device)
+            
+        loss = loss + (entropy_weight * dynamic_scale) * closeness_scale * entropy
     
     return torch.mean(loss)
 

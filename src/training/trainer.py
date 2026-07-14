@@ -198,7 +198,15 @@ class TrainManager:
             batches_processed += 1
 
         num_batches = max(batches_processed, 1)
-        return total_loss / num_batches
+        avg_loss = total_loss / num_batches
+        
+        # Flaw 3 Fix: Sync training loss across DDP ranks
+        if torch.distributed.is_initialized():
+            loss_tensor = torch.tensor(avg_loss, device=self.device)
+            torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
+            avg_loss = (loss_tensor / torch.distributed.get_world_size()).item()
+            
+        return avg_loss
 
     def validate(self, dataloader):
         self.model.eval()
@@ -274,8 +282,16 @@ class TrainManager:
         s3_bucket = self.config.get("s3_bucket")
         if s3_bucket and self._is_rank_zero():
             s3_key = f"{self.full_config.get('project_name', 'crop_yield')}/{self.RESUME_CKPT_NAME}"
-            self._upload_queue.put((final_path, s3_bucket, s3_key))
-            logger.debug(f"Queued checkpoint for background S3 upload: {s3_key}")
+            # Flaw 6 Fix: Check thread health and use timeout to prevent deadlock
+            import queue
+            if getattr(self, '_uploader_thread', None) is not None and self._uploader_thread.is_alive():
+                try:
+                    self._upload_queue.put((final_path, s3_bucket, s3_key), timeout=2.0)
+                    logger.debug(f"Queued checkpoint for background S3 upload: {s3_key}")
+                except queue.Full:
+                    logger.error("Upload queue is full. Dropping S3 upload for this checkpoint.")
+            else:
+                logger.error("Background uploader thread is dead. Dropping S3 upload for this checkpoint.")
 
     def _load_resume_checkpoint(self, save_path: str) -> Optional[int]:
         """If a resume checkpoint exists, restore all state and return start epoch."""

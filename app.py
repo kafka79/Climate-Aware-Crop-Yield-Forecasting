@@ -201,29 +201,24 @@ hr {{ border:none; border-top:1px solid var(--border-color); margin:1.5rem 0; }}
 import streamlit.components.v1 as components
 
 _CONNECTION_MONITOR_HTML = """
-<div id="conn-banner" style="
-    display:none; position:fixed; top:0; left:0; right:0; z-index:99999;
-    background:rgba(239,68,68,0.95); color:white; text-align:center;
-    padding:10px 16px; font-family:'Inter',sans-serif; font-size:0.88rem;
-    font-weight:600; backdrop-filter:blur(8px); letter-spacing:0.01em;
-">
-    ⚠️ Connection lost — forecast controls are disabled until reconnected.
-</div>
-<!-- Full-viewport blocking overlay: rendered inside the iframe and stretched
-     to cover the parent viewport using position:fixed.  This avoids ALL
-     direct parent DOM manipulation (no querySelectorAll, no button[kind=...]),
-     making the monitor immune to Streamlit internal class/element changes.
-     The overlay captures pointer events, preventing any clicks from reaching
-     underlying Streamlit controls while connection is lost. -->
-<div id="conn-overlay" style="
-    display:none; position:fixed; top:0; left:0; width:100vw; height:100vh;
-    z-index:99998; background:rgba(15,23,42,0.3); backdrop-filter:blur(4px);
-    pointer-events:all; cursor:not-allowed;
-"></div>
 <script>
 (function() {
-    var banner = document.getElementById('conn-banner');
-    var overlay = document.getElementById('conn-overlay');
+    var parentDoc = window.parent.document;
+    if (parentDoc.getElementById('conn-banner')) {
+        return; // Already injected
+    }
+
+    var banner = parentDoc.createElement('div');
+    banner.id = 'conn-banner';
+    banner.style.cssText = "display:none; position:fixed; top:0; left:0; right:0; z-index:99999; background:rgba(239,68,68,0.95); color:white; text-align:center; padding:10px 16px; font-family:'Inter',sans-serif; font-size:0.88rem; font-weight:600; backdrop-filter:blur(8px); letter-spacing:0.01em;";
+    banner.innerText = "⚠️ Connection lost — forecast controls are disabled until reconnected.";
+    parentDoc.body.appendChild(banner);
+
+    var overlay = parentDoc.createElement('div');
+    overlay.id = 'conn-overlay';
+    overlay.style.cssText = "display:none; position:fixed; top:0; left:0; width:100vw; height:100vh; z-index:99998; background:rgba(15,23,42,0.3); backdrop-filter:blur(4px); pointer-events:all; cursor:not-allowed;";
+    parentDoc.body.appendChild(overlay);
+
     var CHECK_INTERVAL = 3000;
     
     function setDisconnected() {
@@ -263,8 +258,8 @@ _CONNECTION_MONITOR_HTML = """
     // Periodically ping
     setInterval(checkConnection, CHECK_INTERVAL);
     
-    window.addEventListener('online', checkConnection);
-    window.addEventListener('offline', setDisconnected);
+    window.parent.addEventListener('online', checkConnection);
+    window.parent.addEventListener('offline', setDisconnected);
     
     checkConnection();
 })();

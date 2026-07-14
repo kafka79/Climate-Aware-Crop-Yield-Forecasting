@@ -327,25 +327,27 @@ def test_soil_downloader_fallback_physical_defaults(tmp_path):
 
 def test_safe_cache_serializer_validation():
     from src.inference.runtime import SafeCacheSerializer
-    import io
-    import base64
+    import pickle
+    import pytest
+    import os
     
-    # 1. Test unplausibly high dimensions (> 5)
-    high_dim_arr = np.zeros((2, 2, 2, 2, 2, 2))
-    b64_str = SafeCacheSerializer._array_to_b64(high_dim_arr)
-    with pytest.raises(ValueError, match="high dimensions"):
-        SafeCacheSerializer._b64_to_array(b64_str)
+    class MaliciousPayload:
+        def __reduce__(self):
+            return (os.system, ('echo hacked',))
+    
+    # 1. Test that MaliciousPayload fails deserialization
+    malicious_bytes = pickle.dumps(MaliciousPayload())
+    
+    with pytest.raises(pickle.UnpicklingError, match="forbidden"):
+        SafeCacheSerializer.deserialize(malicious_bytes)
         
-    # 2. Test non-numeric types
-    str_arr = np.array(["unsafe", "payload"], dtype=object)
-    buf = io.BytesIO()
-    try:
-        np.save(buf, str_arr, allow_pickle=True)
-        obj_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-        with pytest.raises(ValueError):
-            SafeCacheSerializer._b64_to_array(obj_b64)
-    except Exception:
-        pass
+    # 2. Test that a normal payload succeeds
+    import torch
+    safe_data = {"data": torch.tensor([1, 2, 3])}
+    safe_bytes = SafeCacheSerializer.serialize(safe_data)
+    deserialized = SafeCacheSerializer.deserialize(safe_bytes)
+    assert "data" in deserialized
+    assert torch.equal(deserialized["data"], safe_data["data"])
 
 
 def test_trainer_sync_termination_flag_no_op():

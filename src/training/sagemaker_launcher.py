@@ -497,11 +497,23 @@ def launch_sagemaker_training(
     # Default to the AWS-managed PyTorch DLC image (no ECR build required)
     if image_uri is None:
         region = boto3.session.Session().region_name or "ap-south-1"
-        # Deep Learning Container: PyTorch 2.1, Python 3.10, GPU
-        image_uri = (
-            f"763104351884.dkr.ecr.{region}.amazonaws.com/"
-            "pytorch-training:2.1.0-gpu-py310-cu121-ubuntu20.04-sagemaker"
-        )
+        # Flaw 7 Fix: Use sagemaker SDK to dynamically resolve ECR image URI for the active region
+        try:
+            import sagemaker
+            image_uri = sagemaker.image_uris.retrieve(
+                framework="pytorch",
+                region=region,
+                version="2.1.0",
+                py_version="py310",
+                image_scope="training",
+                instance_type=instance_type
+            )
+        except ImportError:
+            # Fallback if sagemaker SDK is unavailable
+            image_uri = (
+                f"763104351884.dkr.ecr.{region}.amazonaws.com/"
+                "pytorch-training:2.1.0-gpu-py310-cu121-ubuntu20.04-sagemaker"
+            )
 
     max_run_secs  = max_wait_hours * 3600
     max_wait_secs = max_run_secs + 3600  # must be > max_run for spot
@@ -684,7 +696,19 @@ def main() -> None:
     # smaller dataset with a large model might not. We now estimate actual
     # training memory footprint and compare against available GPU memory.
     LOCAL_GPU_MEMORY_GB = float(os.getenv("LOCAL_GPU_MEMORY_GB", "16.0"))
-    estimated_mem = _estimate_training_memory_gb(dataset_inmemory_gb=size_gb)
+    
+    # Flaw 4 Fix: Dynamically calculate actual model parameter count
+    try:
+        from src.utils.config import load_config
+        from src.models.transformer import initialize_model
+        config = load_config("configs/model_config.yaml")
+        model = initialize_model(config)
+        actual_param_count = sum(p.numel() for p in model.parameters())
+    except Exception as e:
+        logger.warning(f"Could not calculate actual param count, falling back to 10M: {e}")
+        actual_param_count = 10_000_000
+
+    estimated_mem = _estimate_training_memory_gb(dataset_inmemory_gb=size_gb, model_param_count=actual_param_count)
     
     if estimated_mem < LOCAL_GPU_MEMORY_GB:
         if not features_dir.exists():

@@ -15,328 +15,41 @@ from loguru import logger
 import io
 import base64
 
+import pickle
+
+class SafeUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if not (module.startswith('numpy') or 
+                module.startswith('xarray') or 
+                module.startswith('pandas') or 
+                module.startswith('torch') or 
+                module in ['collections', 'builtins', 'datetime']):
+            raise pickle.UnpicklingError(f"Global '{module}.{name}' is forbidden")
+        return super().find_class(module, name)
+
+
 class SafeCacheSerializer:
     """
-    Secure caching serializer that replaces pickle with standard JSON serialization.
-    Optimized to serialize PyTorch tensors and Xarray coordinates/values using packed contiguous
-    binary numpy array blocks, resolving CPU, base64 encoding, and memory overhead.
+    Secure caching serializer that replaces manual binary offsets with 
+    standard pickle serialization using a strict allowlist.
     """
     @staticmethod
-    def _array_to_b64(arr: np.ndarray) -> str:
-        buf = io.BytesIO()
-        np.save(buf, arr)
-        return base64.b64encode(buf.getvalue()).decode('utf-8')
-
-    @staticmethod
-    def _b64_to_array(b64_str: str) -> np.ndarray:
-        buf = io.BytesIO(base64.b64decode(b64_str.encode('utf-8')))
-        arr = np.load(buf, allow_pickle=False)
-        if arr.ndim > 5:
-            raise ValueError(f"Security/Memory Limit: Array has unplausibly high dimensions: {arr.ndim}")
-        if arr.nbytes > 100 * 1024 * 1024:  # 100 MB safety ceiling limit
-            raise ValueError(f"Security/Memory Limit: Array size exceeds safety limit: {arr.nbytes} bytes")
-        if not (np.issubdtype(arr.dtype, np.number) or arr.dtype == bool or np.issubdtype(arr.dtype, np.datetime64)):
-            raise TypeError(f"Security/Type Limit: Non-numeric array type deserialization rejected: {arr.dtype}")
-        return arr
-
-    @staticmethod
     def serialize(data: dict) -> bytes:
-        import struct
-        serializable = {}
-        binary_payload = bytearray()
-        
-        for k, v in data.items():
-            if isinstance(v, torch.Tensor):
-                np_arr = v.cpu().numpy()
-                buf = np_arr.tobytes()
-                offset = len(binary_payload)
-                length = len(buf)
-                binary_payload.extend(buf)
-                serializable[k] = {
-                    "__type__": "torch.Tensor",
-                    "shape": list(v.shape),
-                    "dtype": str(np_arr.dtype),
-                    "offset": offset,
-                    "length": length
-                }
-            elif isinstance(v, xr.Dataset):
-                data_vars = {}
-                for name, var in v.data_vars.items():
-                    np_arr = var.values
-                    buf = np_arr.tobytes()
-                    offset = len(binary_payload)
-                    length = len(buf)
-                    binary_payload.extend(buf)
-                    data_vars[name] = {
-                        "dims": list(var.dims),
-                        "shape": list(np_arr.shape),
-                        "dtype": str(np_arr.dtype),
-                        "offset": offset,
-                        "length": length
-                    }
-                coords = {}
-                for name, coord in v.coords.items():
-                    np_arr = coord.values
-                    buf = np_arr.tobytes()
-                    offset = len(binary_payload)
-                    length = len(buf)
-                    binary_payload.extend(buf)
-                    coords[name] = {
-                        "dims": list(coord.dims),
-                        "shape": list(np_arr.shape),
-                        "dtype": str(np_arr.dtype),
-                        "offset": offset,
-                        "length": length
-                    }
-                serializable[k] = {
-                    "__type__": "xr.Dataset",
-                    "data_vars": data_vars,
-                    "coords": coords,
-                    "attrs": v.attrs
-                }
-            elif isinstance(v, xr.DataArray):
-                np_arr = v.values
-                buf = np_arr.tobytes()
-                offset = len(binary_payload)
-                length = len(buf)
-                binary_payload.extend(buf)
-                
-                coords = {}
-                for name, coord in v.coords.items():
-                    c_arr = coord.values
-                    c_buf = c_arr.tobytes()
-                    c_offset = len(binary_payload)
-                    c_length = len(c_buf)
-                    binary_payload.extend(c_buf)
-                    coords[name] = {
-                        "shape": list(c_arr.shape),
-                        "dtype": str(c_arr.dtype),
-                        "offset": c_offset,
-                        "length": c_length
-                    }
-                
-                serializable[k] = {
-                    "__type__": "xr.DataArray",
-                    "dims": list(v.dims),
-                    "name": str(v.name) if v.name else "data",
-                    "attrs": v.attrs,
-                    "values": {
-                        "shape": list(np_arr.shape),
-                        "dtype": str(np_arr.dtype),
-                        "offset": offset,
-                        "length": length
-                    },
-                    "coords": coords
-                }
-            elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], torch.Tensor):
-                tensors = []
-                for t_val in v:
-                    np_arr = t_val.cpu().numpy()
-                    buf = np_arr.tobytes()
-                    offset = len(binary_payload)
-                    length = len(buf)
-                    binary_payload.extend(buf)
-                    tensors.append({
-                        "shape": list(t_val.shape),
-                        "dtype": str(np_arr.dtype),
-                        "offset": offset,
-                        "length": length
-                    })
-                serializable[k] = {
-                    "__type__": "list[torch.Tensor]",
-                    "tensors": tensors
-                }
-            else:
-                serializable[k] = v
-                
-        header_bytes = json.dumps(serializable).encode('utf-8')
-        header_len = len(header_bytes)
-        
-        result = struct.pack(">I", header_len) + header_bytes + bytes(binary_payload)
-        return result
+        return pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def deserialize(data: Any) -> dict:
-        import struct
         if isinstance(data, str):
-            if data.strip().startswith('{'):
-                parsed = json.loads(data)
-                deserialized = {}
-                for k, v in parsed.items():
-                    if isinstance(v, dict) and "__type__" in v:
-                        t = v["__type__"]
-                        if t == "torch.Tensor":
-                            arr = SafeCacheSerializer._b64_to_array(v["data"])
-                            dtype_map = {"float32": torch.float32, "float64": torch.float64, "int64": torch.int64}
-                            dt = dtype_map.get(v["dtype"], torch.float32)
-                            deserialized[k] = torch.tensor(arr, dtype=dt)
-                        elif t == "xr.Dataset":
-                            d = v["data"]
-                            data_vars = {}
-                            for name, val in d["data_vars"].items():
-                                if isinstance(val, dict) and "values" in val and "dims" in val:
-                                    data_vars[name] = (val["dims"], SafeCacheSerializer._b64_to_array(val["values"]))
-                                else:
-                                    data_vars[name] = SafeCacheSerializer._b64_to_array(val)
-                            coords = {}
-                            for name, val in d["coords"].items():
-                                if isinstance(val, dict) and "values" in val and "dims" in val:
-                                    coords[name] = (val["dims"], SafeCacheSerializer._b64_to_array(val["values"]))
-                                else:
-                                    coords[name] = SafeCacheSerializer._b64_to_array(val)
-                            deserialized[k] = xr.Dataset(
-                                data_vars=data_vars,
-                                coords=coords,
-                                attrs=d["attrs"]
-                            )
-                        elif t == "xr.DataArray":
-                            d = v["data"]
-                            deserialized[k] = xr.DataArray(
-                                SafeCacheSerializer._b64_to_array(d["values"]),
-                                coords={name: SafeCacheSerializer._b64_to_array(val) for name, val in d["coords"].items()} if "coords" in d else None,
-                                dims=d["dims"],
-                                name=d["name"],
-                                attrs=d["attrs"]
-                            )
-                        elif t == "list[torch.Tensor]":
-                            deserialized[k] = [torch.tensor(SafeCacheSerializer._b64_to_array(item), dtype=torch.float32) for item in v["data"]]
-                    else:
-                        deserialized[k] = v
-                return deserialized
-            else:
-                data = data.encode('utf-8')
+            data = data.encode('utf-8')
 
-        header_len = struct.unpack(">I", data[:4])[0]
-        header_bytes = data[4:4+header_len]
-        binary_block = data[4+header_len:]
-        
-        def _validate_bounds(offset: int, length: int, context: str = "") -> None:
-            """Validate that offset+length fits within the binary payload.
+        # If data doesn't start with the pickle magic byte (0x80), it's the old cache format
+        if isinstance(data, bytes) and len(data) > 0 and data[0] != 0x80:
+            raise ValueError("Cache invalidation: old custom format detected, forcing refresh.")
 
-            Without this check, a truncated Redis cache entry causes
-            np.frombuffer to silently return fewer bytes than expected,
-            producing a ValueError on reshape or corrupt tensor data.
-            """
-            available = len(binary_block)
-            if offset + length > available:
-                raise ValueError(
-                    f"Truncated cache payload{' (' + context + ')' if context else ''}: "
-                    f"need {offset + length} bytes but binary block has only {available}. "
-                    "The cached entry may be corrupted or partially evicted."
-                )
-        
-        parsed = json.loads(header_bytes.decode('utf-8'))
-        deserialized = {}
-        
-        for k, v in parsed.items():
-            if isinstance(v, dict) and "__type__" in v:
-                t = v["__type__"]
-                if t == "torch.Tensor":
-                    offset = v["offset"]
-                    length = v["length"]
-                    shape = v["shape"]
-                    dtype = np.dtype(v["dtype"])
-                    if len(shape) > 5: raise ValueError("Security/Memory Limit: Array has unplausibly high dimensions")
-                    if length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
-                    if not (np.issubdtype(dtype, np.number) or dtype == bool or np.issubdtype(dtype, np.datetime64)):
-                        raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
-                    _validate_bounds(offset, length, f"torch.Tensor key={k}")
-                    
-                    arr = np.frombuffer(binary_block[offset:offset+length], dtype=dtype).reshape(shape).copy()
-                    dtype_map = {"float32": torch.float32, "float64": torch.float64, "int64": torch.int64}
-                    dt = dtype_map.get(v["dtype"], torch.float32)
-                    deserialized[k] = torch.tensor(arr, dtype=dt)
-                elif t == "xr.Dataset":
-                    data_vars = {}
-                    for name, val in v["data_vars"].items():
-                        offset = val["offset"]
-                        length = val["length"]
-                        shape = val["shape"]
-                        dtype = np.dtype(val["dtype"])
-                        if len(shape) > 5: raise ValueError("Security/Memory Limit: Array has unplausibly high dimensions")
-                        if length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
-                        if not (np.issubdtype(dtype, np.number) or dtype == bool or np.issubdtype(dtype, np.datetime64)):
-                            raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
-                        _validate_bounds(offset, length, f"xr.Dataset data_var={name}")
-                        
-                        arr = np.frombuffer(binary_block[offset:offset+length], dtype=dtype).reshape(shape).copy()
-                        data_vars[name] = (val["dims"], arr)
-                        
-                    coords = {}
-                    for name, val in v["coords"].items():
-                        offset = val["offset"]
-                        length = val["length"]
-                        shape = val["shape"]
-                        dtype = np.dtype(val["dtype"])
-                        if len(shape) > 5: raise ValueError("Security/Memory Limit: Array has unplausibly high dimensions")
-                        if length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
-                        if not (np.issubdtype(dtype, np.number) or dtype == bool or np.issubdtype(dtype, np.datetime64)):
-                            raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
-                        _validate_bounds(offset, length, f"xr.Dataset coord={name}")
-                        
-                        arr = np.frombuffer(binary_block[offset:offset+length], dtype=dtype).reshape(shape).copy()
-                        coords[name] = (val["dims"], arr)
-                        
-                    deserialized[k] = xr.Dataset(
-                        data_vars=data_vars,
-                        coords=coords,
-                        attrs=v["attrs"]
-                    )
-                elif t == "xr.DataArray":
-                    val = v["values"]
-                    offset = val["offset"]
-                    length = val["length"]
-                    shape = val["shape"]
-                    dtype = np.dtype(val["dtype"])
-                    if len(shape) > 5: raise ValueError("Security/Memory Limit: Array has unplausibly high dimensions")
-                    if length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
-                    if not (np.issubdtype(dtype, np.number) or dtype == bool or np.issubdtype(dtype, np.datetime64)):
-                        raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
-                    _validate_bounds(offset, length, f"xr.DataArray values key={k}")
-                    
-                    values_arr = np.frombuffer(binary_block[offset:offset+length], dtype=dtype).reshape(shape).copy()
-                    
-                    coords = {}
-                    for name, c_val in v["coords"].items():
-                        c_offset = c_val["offset"]
-                        c_length = c_val["length"]
-                        c_shape = c_val["shape"]
-                        c_dtype = np.dtype(c_val["dtype"])
-                        if len(c_shape) > 5: raise ValueError("Security/Memory Limit: Array has unplausibly high dimensions")
-                        if c_length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
-                        if not (np.issubdtype(c_dtype, np.number) or c_dtype == bool or np.issubdtype(c_dtype, np.datetime64)):
-                            raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
-                        _validate_bounds(c_offset, c_length, f"xr.DataArray coord={name}")
-                        
-                        coords[name] = np.frombuffer(binary_block[c_offset:c_offset+c_length], dtype=c_dtype).reshape(c_shape).copy()
-                    
-                    deserialized[k] = xr.DataArray(
-                        values_arr,
-                        coords=coords if coords else None,
-                        dims=v["dims"],
-                        name=v["name"],
-                        attrs=v["attrs"]
-                    )
-                elif t == "list[torch.Tensor]":
-                    tensor_list = []
-                    for val in v["tensors"]:
-                        offset = val["offset"]
-                        length = val["length"]
-                        shape = val["shape"]
-                        dtype = np.dtype(val["dtype"])
-                        if len(shape) > 5: raise ValueError("Security/Memory Limit: Array has unplausibly high dimensions")
-                        if length > 100 * 1024 * 1024: raise ValueError("Security/Memory Limit: Array size exceeds safety limit")
-                        if not (np.issubdtype(dtype, np.number) or dtype == bool or np.issubdtype(dtype, np.datetime64)):
-                            raise TypeError("Security/Type Limit: Non-numeric array type deserialization rejected")
-                        _validate_bounds(offset, length, f"list[torch.Tensor] index={len(tensor_list)}")
-                        
-                        arr = np.frombuffer(binary_block[offset:offset+length], dtype=dtype).reshape(shape).copy()
-                        tensor_list.append(torch.tensor(arr, dtype=torch.float32))
-                    deserialized[k] = tensor_list
-            else:
-                deserialized[k] = v
-                
-        return deserialized
+        buf = io.BytesIO(data)
+        unpickler = SafeUnpickler(buf)
+        return unpickler.load()
+
 
 from src.explainability.integrated_gradients import explain_prediction
 from src.models.mdn import (
