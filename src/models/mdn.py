@@ -604,7 +604,7 @@ def mdn_loss(pi: torch.Tensor, sigma: torch.Tensor, mu: torch.Tensor, target: to
     # Use LogSumExp for stability and leverage pre-computed log_pi if available
     log_pi = getattr(pi, "log_pi", None)
     if log_pi is None:
-        log_pi = torch.log(pi + 1e-10)
+        log_pi = torch.log(pi.clamp(min=1e-8))
         
     nll = -torch.logsumexp(log_pi + log_prob, dim=1) # (B,)
     
