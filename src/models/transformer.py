@@ -115,8 +115,8 @@ class MultiModalTransformer(nn.Module):
         max_kv_len = self.config.get("max_kv_len", 12)
         if T > max_kv_len:
             # ponytail: avg_pool alone destroys pest/frost/heatwave spikes.
-            # Concat avg+max preserves both trends and extremes. Cheap, no new params.
-            # sat: (B, T, C) -> (B, C, T) -> pool -> concat -> (B, max_kv_len, C)
+            # Average of avg+max preserves both trends and extremes. Cheap, no new params.
+            # sat: (B, T, C) -> (B, C, T) -> pool -> average -> (B, max_kv_len, C)
             sat_t = sat.transpose(1, 2)
             sat_avg = torch.nn.functional.adaptive_avg_pool1d(sat_t, max_kv_len)
             sat_max = torch.nn.functional.adaptive_max_pool1d(sat_t, max_kv_len)
@@ -199,6 +199,10 @@ def load_model_weights(model: nn.Module, model_path: str, device: torch.device) 
     for key in keys:
         if key.startswith("super_res."):
             new_key = key.replace("super_res.", "temporal_conv.")
+            state_dict[new_key] = state_dict.pop(key)
+            logger.info(f"Mapped legacy weight key: {key} -> {new_key}")
+        elif "mdn_head.pi.0." in key:
+            new_key = key.replace("mdn_head.pi.0.", "mdn_head.pi.")
             state_dict[new_key] = state_dict.pop(key)
             logger.info(f"Mapped legacy weight key: {key} -> {new_key}")
             

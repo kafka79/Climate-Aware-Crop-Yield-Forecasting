@@ -28,10 +28,7 @@ class MixtureDensityNetwork(nn.Module):
         self.sigma_min = 1e-4
 
         # MDN Head
-        self.pi = nn.Sequential(
-            nn.Linear(input_dim, num_mixtures),
-            nn.Softmax(dim=1) # Mixing coefficients must sum to 1
-        )
+        self.pi = nn.Linear(input_dim, num_mixtures)
         # Log-sigma parameterization: network outputs unconstrained values,
         # converted to positive sigma via softplus + floor in forward()
         self.log_sigma = nn.Linear(input_dim, num_mixtures * output_dim)
@@ -43,9 +40,7 @@ class MixtureDensityNetwork(nn.Module):
         x: (B, D) - Hidden representation from Transformer
         returns: (pi, sigma, mu)
         """
-        # Access the underlying Linear layer in self.pi Sequential block to get raw logits
-        # this preserves key compatibility with existing checkpoints
-        pi_logits = self.pi[0](x)
+        pi_logits = self.pi(x)
         log_sigma_raw = self.log_sigma(x)
         mu = self.mu(x)
         
@@ -57,9 +52,8 @@ class MixtureDensityNetwork(nn.Module):
         # sigma_min provides an absolute floor without creating gradient discontinuities
         sigma = nn.functional.softplus(log_sigma_raw) + self.sigma_min
         
-        # Stably compute pi and log_pi
+        # Stably compute pi
         pi = nn.functional.softmax(pi_logits, dim=1)
-        pi.log_pi = nn.functional.log_softmax(pi_logits, dim=1)
         
         return pi, sigma, mu
 
